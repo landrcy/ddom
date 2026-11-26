@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>DDOM — Daily Dose of Maggie</title>
+  <meta name="description" content="Daily Dose of Maggie: press a button to pick a photo of Maggie and watch hundreds of other Maggie photos assemble together to form it. Zoom in to inspect every single photo.">
+  <meta property="og:title" content="DDOM — Daily Dose of Maggie">
+  <meta property="og:description" content="Interactive photo mosaic of Maggie. Pick a daily or random photo, watch it assemble out of hundreds of other Maggie photos, and zoom in to every tile.">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#f6f1e9">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23231a14'/%3E%3Ccircle cx='21' cy='25' r='6' fill='%23d48554'/%3E%3Ccircle cx='32' cy='18' r='6' fill='%23e8a774'/%3E%3Ccircle cx='43' cy='25' r='6' fill='%23d48554'/%3E%3Cpath d='M18 41c0-8 6-14 14-14s14 6 14 14c0 5-4 8-8 8-3 0-4-1.5-6-1.5S29 49 26 49c-4 0-8-3-8-8z' fill='%23f6f1e9'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="paper-grain" aria-hidden="true"></div>
+
+  <header class="topbar" id="topbar">
+    <div class="brand">
+      <a href="#top" class="wordmark-link" id="reset-view-brand" title="Fit Maggie mosaic to screen">
+        <h1 class="wordmark">ddom</h1>
+      </a>
+      <span class="brand-sep" aria-hidden="true"></span>
+      <div class="brand-meta">
+        <span class="brand-title">Daily Dose of Maggie</span>
+        <span class="brand-stats" id="mosaic-stats">Loading Maggie's photos…</span>
+      </div>
+    </div>
+
+    <nav class="nav-actions" aria-label="Mosaic controls">
+      <button type="button" class="btn btn-primary" id="btn-random-maggie" title="Pick a random Maggie photo and assemble it from all the others (R)">
+        <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <path d="M3 6h3.2c1.6 0 2.4 1 3.3 2.7l1 1.9c.9 1.7 1.7 2.7 3.3 2.7H17M14.5 11l2.5 2.3-2.5 2.3M17 6h-3.2c-1 0-1.7.4-2.3 1.2M3 13.3h3.2c1 0 1.7-.4 2.3-1.2M14.5 3.7L17 6l-2.5 2.3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Random Maggie</span>
+      </button>
+      <button type="button" class="btn btn-subtle" id="btn-daily-dose" title="Assemble Today's Daily Dose of Maggie">
+        <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <circle cx="10" cy="10" r="3.5"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.5 1.5M13.8 13.8l1.5 1.5M15.3 4.7l-1.5 1.5M6.2 13.8l-1.5 1.5" stroke-linecap="round"/>
+        </svg>
+        <span class="hide-sm">Today's Dose</span>
+      </button>
+      <button type="button" class="btn btn-subtle" id="btn-gallery" title="Browse all Maggie photos">
+        <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <rect x="3" y="3" width="5.5" height="5.5" rx="1.2"/><rect x="11.5" y="3" width="5.5" height="5.5" rx="1.2"/><rect x="3" y="11.5" width="5.5" height="5.5" rx="1.2"/><rect x="11.5" y="11.5" width="5.5" height="5.5" rx="1.2"/>
+        </svg>
+        <span class="hide-sm">Gallery</span>
+      </button>
+      <button type="button" class="btn btn-outline" id="btn-studio" title="Export poster PNG or upload your own photos">
+        <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M10 3v9.5m0 0l-3.2-3.2M10 12.5l3.2-3.2M4 15.5h12" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="hide-sm">Export / Studio</span>
+      </button>
+    </nav>
+  </header>
+
+  <main class="stage" id="stage" aria-label="Interactive Maggie photo mosaic">
+    <canvas id="mosaic-canvas" aria-label="Zoomable photo mosaic of Maggie. Scroll or pinch to zoom, drag to pan, click any tile to inspect the full photo."></canvas>
+
+    <!-- Subtle loading state -->
+    <div class="stage-loader" id="stage-loader" role="status" aria-live="polite">
+      <div class="loader-ring"></div>
+      <p class="loader-text" id="loader-text">Gathering Maggie's photos…</p>
+    </div>
+
+    <!-- Subtle tile hover pill -->
+    <div class="hover-pill" id="hover-pill" aria-hidden="true"></div>
+
+    <!-- Floating bottom-left viewport controls -->
+    <aside class="controls-dock" id="controls-dock" aria-label="Zoom, grid density, and view controls">
+      <div class="zoom-group">
+        <button type="button" class="icon-btn" id="btn-zoom-out" aria-label="Zoom out" title="Zoom out (-)">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M5 10h10" stroke-linecap="round"/></svg>
+        </button>
+        <button type="button" class="zoom-readout" id="btn-zoom-fit" title="Reset view (0)">100%</button>
+        <button type="button" class="icon-btn" id="btn-zoom-in" aria-label="Zoom in" title="Zoom in (+)">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M10 5v10M5 10h10" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+
+      <span class="dock-sep" aria-hidden="true"></span>
+
+      <div class="grid-seg" id="grid-seg" role="group" aria-label="Mosaic grid size" title="Number of tiles along the longer edge">
+        <button type="button" class="seg-btn" data-grid="36">36</button>
+        <button type="button" class="seg-btn active" data-grid="48">48</button>
+        <button type="button" class="seg-btn" data-grid="64">64</button>
+      </div>
+
+      <span class="dock-sep hide-xs" aria-hidden="true"></span>
+
+      <label class="blend-control hide-xs" for="harmony-slider" title="Color harmony glaze when zoomed out (automatically fades to 0% as you zoom into tiles)">
+        <span class="blend-label">Tint</span>
+        <input type="range" id="harmony-slider" min="0" max="40" value="20">
+      </label>
+
+      <span class="dock-sep hide-xs" aria-hidden="true"></span>
+
+      <button type="button" class="peek-btn hide-xs" id="btn-peek" title="Hold to compare with the original Maggie photo (Space)">
+        <svg class="ico-sm" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M2.5 10s3-5 7.5-5 7.5 5 7.5 5-3 5-7.5 5-7.5-5-7.5-5z"/><circle cx="10" cy="10" r="2.2"/>
+        </svg>
+        <span>Original</span>
+      </button>
+    </aside>
+
+    <!-- Floating bottom-right Current Portrait Spotlight Card -->
+    <aside class="daily-card" id="daily-card" aria-label="Current Maggie portrait">
+      <button type="button" class="daily-thumb-wrap" id="daily-open-thumb" title="View full original photo">
+        <img id="daily-thumb" src="" alt="Currently assembled photo of Maggie" width="54" height="54">
+      </button>
+      <div class="daily-copy">
+        <span class="daily-eyebrow" id="daily-eyebrow">Today's Dose</span>
+        <strong class="daily-name" id="daily-caption">Maggie</strong>
+        <div class="daily-links">
+          <button type="button" class="text-link" id="daily-open-link">View original</button>
+          <span aria-hidden="true">·</span>
+          <button type="button" class="text-link" id="daily-reassemble-link">Replay</button>
+        </div>
+      </div>
+      <button type="button" class="daily-close" id="daily-dismiss" aria-label="Hide card" title="Minimize card">×</button>
+    </aside>
+  </main>
+
+  <!-- Photo Lightbox Modal -->
+  <div class="modal-backdrop" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lb-title" hidden>
+    <div class="lightbox-shell">
+      <button type="button" class="lb-close" id="lb-close" aria-label="Close photo">×</button>
+
+      <div class="lb-media-col">
+        <button type="button" class="lb-nav lb-prev" id="lb-prev" aria-label="Previous photo">‹</button>
+        <figure class="lb-frame">
+          <img id="lb-img" src="" alt="Photo of Maggie">
+        </figure>
+        <button type="button" class="lb-nav lb-next" id="lb-next" aria-label="Next photo">›</button>
+      </div>
+
+      <div class="lb-info-col">
+        <div class="lb-head">
+          <span class="lb-kicker" id="lb-kicker">Maggie Photo</span>
+          <h2 class="lb-title" id="lb-title">Maggie</h2>
+          <p class="lb-sub" id="lb-sub">Row 1, Column 1</p>
+        </div>
+
+        <div class="lb-locator" id="lb-locator">
+          <span class="lb-loc-label">Where in this mosaic</span>
+          <div class="lb-minimap" id="lb-minimap">
+            <img id="lb-minimap-img" src="" alt="" aria-hidden="true">
+            <span class="lb-minimap-pin" id="lb-minimap-pin"></span>
+          </div>
+        </div>
+
+        <div class="lb-actions">
+          <button type="button" class="btn btn-primary btn-full" id="lb-assemble">Build Mosaic of This Photo</button>
+          <button type="button" class="btn btn-subtle btn-full" id="lb-locate">Zoom to Tile in Mosaic</button>
+          <a class="btn btn-outline btn-full" id="lb-open-hd" href="#" target="_blank" rel="noopener">Open Full Resolution</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- All Photos Gallery Modal -->
+  <div class="modal-backdrop" id="gallery-modal" role="dialog" aria-modal="true" aria-labelledby="gal-heading" hidden>
+    <div class="gallery-shell">
+      <div class="gallery-head">
+        <div>
+          <h2 class="gallery-title" id="gal-heading">Maggie's Photo Archive</h2>
+          <p class="gallery-sub" id="gal-sub">Pick any photo of Maggie to inspect or assemble into a giant mosaic.</p>
+        </div>
+        <button type="button" class="lb-close static" id="gal-close" aria-label="Close gallery">×</button>
+      </div>
+      <div class="gallery-grid" id="gallery-grid"></div>
+      <div class="gallery-foot" id="gallery-foot" hidden>
+        <button type="button" class="btn btn-subtle" id="btn-gallery-more">Load More Photos</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Slide-Over Export & Custom Studio Drawer -->
+  <div class="drawer-backdrop" id="studio-backdrop" hidden>
+    <aside class="studio-drawer" id="studio-drawer" role="dialog" aria-modal="true" aria-labelledby="studio-heading">
+      <div class="studio-head">
+        <div>
+          <h2 class="studio-title" id="studio-heading">Export &amp; Custom Studio</h2>
+          <p class="studio-sub">Save the current Maggie mosaic as a crisp poster, or drop your own photos.</p>
+        </div>
+        <button type="button" class="lb-close static" id="studio-close" aria-label="Close studio">×</button>
+      </div>
+
+      <div class="studio-body">
+        <section class="studio-section">
+          <span class="step-label">Current Mosaic Poster</span>
+          <button type="button" class="btn btn-primary btn-full" id="btn-export-png">Download High-Res Poster PNG</button>
+        </section>
+
+        <hr class="studio-divider">
+
+        <section class="studio-section">
+          <span class="step-label">Try Custom Photos Locally</span>
+          <label class="dropzone" id="dz-master" for="input-master">
+            <input type="file" id="input-master" accept="image/*" hidden>
+            <div class="dz-preview" id="master-preview-wrap" hidden>
+              <img id="master-preview-img" src="" alt="Selected master photo">
+            </div>
+            <div class="dz-copy" id="master-dz-copy">
+              <strong>1. Big Target Photo</strong>
+              <span>Drop any photo to turn into a Maggie mosaic</span>
+            </div>
+          </label>
+        </section>
+
+        <section class="studio-section">
+          <label class="dropzone" id="dz-tiles" for="input-tiles">
+            <input type="file" id="input-tiles" accept="image/*" multiple hidden>
+            <div class="dz-copy" id="tiles-dz-copy">
+              <strong>2. Optional Custom Tile Photos</strong>
+              <span>Leave empty to build your custom photo out of Maggie's archive</span>
+            </div>
+          </label>
+          <div class="studio-row-inline">
+            <button type="button" class="text-link" id="btn-pick-folder">Or pick a folder</button>
+            <input type="file" id="input-tiles-folder" webkitdirectory directory multiple hidden>
+            <span class="tile-count-badge" id="studio-tile-count">Using Maggie's archive</span>
+          </div>
+        </section>
+
+        <section class="studio-section studio-tuning">
+          <div class="tuning-grid">
+            <label class="tuning-field" for="studio-cols">
+              <div class="tuning-head"><span>Grid Size (long edge)</span><strong id="studio-cols-val">48 tiles</strong></div>
+              <input type="range" id="studio-cols" min="24" max="72" step="2" value="48">
+            </label>
+            <label class="tuning-field" for="studio-gap">
+              <div class="tuning-head"><span>Anti-Repeat Spacing</span><strong id="studio-gap-val">3 cells</strong></div>
+              <input type="range" id="studio-gap" min="1" max="6" step="1" value="3">
+            </label>
+          </div>
+        </section>
+
+        <div class="studio-progress" id="studio-progress" hidden>
+          <div class="progress-track"><div class="progress-fill" id="studio-progress-fill"></div></div>
+          <span class="progress-text" id="studio-progress-text">Assembling…</span>
+        </div>
+
+        <div class="studio-actions">
+          <button type="button" class="btn btn-outline btn-full" id="btn-build-live">Assemble Custom Mosaic</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script src="js/mosaic-engine.js"></script>
+  <script src="js/viewer.js"></script>
+  <script src="js/studio.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
