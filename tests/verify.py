@@ -94,16 +94,21 @@ def main():
         m3 = page.evaluate("() => ({cols: window.__ddom.getMosaic().cols, rows: window.__ddom.getMosaic().rows})")
         check("Grid size 64 toggle re-assembled", max(m3["cols"], m3["rows"]) == 64, f"{m3['cols']}x{m3['rows']}")
 
-        # Back to balanced 48 + Deep Zoom In to verify crystal-clear untinted Maggie tiles!
+        # Back to balanced 48 + Deep Zoom In to verify crystal-clear, rock-solid Maggie tiles (zero glitching/jumping!)
         page.click('#grid-seg button[data-grid="48"]')
         page.wait_for_timeout(1200)
-        for _ in range(5):
+        for _ in range(6):
             page.click("#btn-zoom-in")
-            page.wait_for_timeout(60)
-        page.wait_for_timeout(900)
+            page.wait_for_timeout(50)
+        page.wait_for_timeout(2200)
         zoom_txt = page.locator("#btn-zoom-fit").inner_text()
         check("Deep zoom renders zoomed Maggie tiles", zoom_txt != "100%", f"zoom={zoom_txt}")
-        page.screenshot(path=os.path.join(SHOTS, "03_zoomed_tiles.png"))
+        shot_a = page.screenshot()
+        page.wait_for_timeout(600)
+        shot_b = page.screenshot()
+        check("Deep zoom rock-solid (zero tile jumping/glitching)", shot_a == shot_b)
+        with open(os.path.join(SHOTS, "03_zoomed_tiles.png"), "wb") as f:
+            f.write(shot_b)
 
         # Click center tile to open Lightbox
         page.mouse.click(640, 400)

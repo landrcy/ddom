@@ -61,7 +61,9 @@ window.DDOM = window.DDOM || {};
       rafId: 0,
       /* Lazy HD tile cache for deep zoom (photoId -> Image) */
       hdCache: new Map(),
-      hdPending: new Set()
+      hdPending: new Set(),
+      hdFailed: new Set(),
+      visibleIds: new Set()
     };
 
     /* Pre-baked offscreen mosaic buffer for ultra-smooth 60fps panning when idle */
@@ -296,15 +298,20 @@ window.DDOM = window.DDOM || {};
     }
 
     function requestHdTile(ph) {
-      if (!ph || !ph.hdThumbUrl || state.hdCache.has(ph.id) || state.hdPending.has(ph.id)) return;
-      if (state.hdPending.size >= 10) return;
+      if (!ph || !ph.hdThumbUrl || state.hdCache.has(ph.id) || state.hdPending.has(ph.id) || state.hdFailed.has(ph.id)) return;
+      if (state.hdPending.size >= 12) return;
       state.hdPending.add(ph.id);
       var im = new Image();
       im.onload = function () {
         state.hdPending.delete(ph.id);
-        if (state.hdCache.size > 160) {
-          var firstKey = state.hdCache.keys().next().value;
-          state.hdCache.delete(firstKey);
+        if (state.hdCache.size >= 700) {
+          /* Evict oldest non-visible entry only, so visible tiles NEVER thrash */
+          for (var key of state.hdCache.keys()) {
+            if (!state.visibleIds.has(key)) {
+              state.hdCache.delete(key);
+              break;
+            }
+          }
         }
         state.hdCache.set(ph.id, im);
         state.dirty = true;
@@ -312,6 +319,7 @@ window.DDOM = window.DDOM || {};
       };
       im.onerror = function () {
         state.hdPending.delete(ph.id);
+        state.hdFailed.add(ph.id);
       };
       im.src = ph.hdThumbUrl;
     }
@@ -446,9 +454,10 @@ window.DDOM = window.DDOM || {};
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(bakedCanvas, tl[0], tl[1], mwPx, mhPx);
       } else {
-        /* Crisp per-tile rendering + HD upgrade when zoomed deep into individual Maggie photos */
+        /* Crisp per-tile rendering + seamless center-cropped HD sharpening when zoomed deep */
         var gap = tileScreenPx > 54 ? Math.min(2.5, (tileScreenPx - 54) * 0.04) : 0;
-        var wantHd = tileScreenPx >= 96;
+        var wantHd = tileScreenPx >= 108;
+        state.visibleIds.clear();
 
         for (var r2 = visR0; r2 <= visR1; r2++) {
           var rowOff2 = r2 * m.cols;
@@ -459,10 +468,24 @@ window.DDOM = window.DDOM || {};
             var ph2 = photos[tid2];
             if (!ph2) continue;
             var dx = tl[0] + c2 * tileScreenPx;
+            if (wantHd) state.visibleIds.add(ph2.id);
 
             var hd = wantHd ? state.hdCache.get(ph2.id) : null;
             if (hd) {
-              ctx.drawImage(hd, dx + gap * 0.5, dy + gap * 0.5, tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35);
+              /* Refresh LRU order so visible tiles stay hot, and draw EXACT center-square crop matching atlas */
+              state.hdCache.delete(ph2.id);
+              state.hdCache.set(ph2.id, hd);
+              var iw = hd.naturalWidth || hd.width;
+              var ih = hd.naturalHeight || hd.height;
+              var side = Math.min(iw, ih);
+              var sx = (iw - side) * 0.5;
+              var sy = (ih - side) * 0.5;
+              ctx.drawImage(
+                hd,
+                sx, sy, side, side,
+                dx + gap * 0.5, dy + gap * 0.5,
+                tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35
+              );
             } else {
               var aIdx2 = ph2.a || 0;
               var aImg2 = atlases[aIdx2];

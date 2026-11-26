@@ -464,7 +464,7 @@
         var ph = data.photos[i];
         ph.id = i;
         ph.fullUrl = ph.u ? (ph.u + '=w1600-no') : (ph.src || '');
-        ph.hdThumbUrl = ph.u ? (ph.u + '=w320-h320-c-no') : (ph.src || '');
+        ph.hdThumbUrl = ph.u ? (ph.u + '=w380-no') : (ph.src || '');
         var s = ph.s;
         var f = new Float32Array(12);
         for (var k = 0; k < 12; k++) f[k] = s[k];
