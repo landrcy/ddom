@@ -1,12 +1,13 @@
-/* DDOM — Daily Dose of Maggie: Fast Perceptual Photomosaic Engine
+/* DDOM — Daily Dose of Maggie: Dual-Mode Perceptual Photomosaic Engine
    Supports two modes seamlessly:
-   1. Dynamic Instant Assembly from precomputed multi-atlas catalog (data/photos.json):
-      Picks any Maggie photo (Today's Dose, Random, or Clicked Tile), samples its exact
-      aspect-preserving 2x2 sub-quadrant tones from the local same-origin preview atlas
-      (0ms network wait, 0 CORS issues), and solves the best tile layout using ALL OTHER
-      Maggie photos (strictly excluding the target photo itself!) with perceptual Redmean
-      color accuracy + spatial anti-repeat spacing + fairness variety!
-   2. Custom Live Studio Assembly from user-dropped files in the browser. */
+   - "pure":      Full untouched solo Maggie photos (center-square crops, zero extra cropping).
+   - "perfected": Expanded Maggie tile pool including safely face-free rescued Maggie photos
+                  + color-perfected sub-crops (cropping at most 50% of any photo, always keeping
+                  Maggie inside the frame) for dramatically higher natural color accuracy!
+   In BOTH modes:
+   - Strictly excludes ALL tiles belonging to the target photo (photo-level exclusion).
+   - Enforces photo-level spatial anti-repetition so two crops of the same photo never touch.
+   - Matches using 2x2 sub-quadrant Redmean perceptual RGB distance (~35–65ms). */
 window.DDOM = window.DDOM || {};
 
 (function () {
@@ -56,7 +57,6 @@ window.DDOM = window.DDOM || {};
     return new Promise(function (r) { setTimeout(r, 0); });
   }
 
-  /* Extract 2x2 sub-quadrant signatures for a (cols x rows) grid from any canvas/image crop */
   function sampleTargetGrid(sourceImg, sx, sy, sw, sh, cols, rows) {
     var sampleW = cols * 4;
     var sampleH = rows * 4;
@@ -100,33 +100,40 @@ window.DDOM = window.DDOM || {};
   }
 
   /**
-   * Synchronously solves a high-accuracy photomosaic in ~25–65ms!
-   * Strictly excludes `excludeId` so the big photo is built purely from OTHER Maggie photos.
+   * Solves tile layout using photo-level exclusion & photo-level anti-repetition!
+   * `tiles` is an array of tile objects where each tile has `.p` (source photo ID) and `.sig` (Float32Array(12)).
    */
-  function solveGrid(cellSigs, tileSigs, cols, rows, opts) {
+  function solveGrid(cellSigs, tiles, numPhotos, cols, rows, opts) {
     opts = opts || {};
-    var nTiles = tileSigs.length;
-    var excludeId = typeof opts.excludeId === 'number' ? opts.excludeId : -1;
+    var nTiles = tiles.length;
+    var excludePhotoId = typeof opts.excludePhotoId === 'number' ? opts.excludePhotoId : -1;
     var total = rows * cols;
     var minGap = typeof opts.minGap === 'number' ? opts.minGap : 3;
-    var effGap = Math.max(1, Math.min(minGap, Math.floor(Math.sqrt(Math.max(1, nTiles - 1)) * 0.72)));
+    var isPerfected = !!opts.perfected;
+    var effGap = Math.max(1, Math.min(minGap, Math.floor(Math.sqrt(Math.max(1, numPhotos - 1)) * 0.72)));
 
-    // Precompute overall RGB for super fast coarse pre-filter when nTiles > 250
     var tileAvg = new Float32Array(nTiles * 3);
+    var tilePhoto = new Int32Array(nTiles);
     for (var t = 0; t < nTiles; t++) {
-      var s = tileSigs[t];
+      var s = tiles[t].sig;
       tileAvg[t * 3]     = (s[0] + s[3] + s[6] + s[9]) * 0.25;
       tileAvg[t * 3 + 1] = (s[1] + s[4] + s[7] + s[10]) * 0.25;
       tileAvg[t * 3 + 2] = (s[2] + s[5] + s[8] + s[11]) * 0.25;
+      tilePhoto[t] = tiles[t].p;
     }
 
-    var grid = new Int32Array(total);
+    var grid = new Int32Array(total);      /* stores tile index in `tiles` */
+    var gridPhoto = new Int32Array(total); /* stores source photo ID `tile.p` */
     grid.fill(-1);
-    var usage = new Int32Array(nTiles);
-    var targetAvg = total / Math.max(1, nTiles - (excludeId >= 0 ? 1 : 0));
-    var nearDist = new Int16Array(nTiles);
-    var usePenalty = nTiles > 400 ? 1600 : 280;
-    var repeatPenalty = nTiles > 400 ? 68000 : 38000;
+    gridPhoto.fill(-1);
+
+    var photoUsage = new Int32Array(numPhotos);
+    var nearPhotoDist = new Int16Array(numPhotos);
+    var targetAvg = total / Math.max(1, numPhotos - (excludePhotoId >= 0 ? 1 : 0));
+
+    /* In Perfected mode, prioritize pure color fidelity even more strongly while still spacing repeats cleanly! */
+    var usePenalty = isPerfected ? 950 : (numPhotos > 400 ? 1550 : 280);
+    var repeatPenalty = isPerfected ? 52000 : (numPhotos > 400 ? 68000 : 38000);
 
     for (var row = 0; row < rows; row++) {
       var rev = (row & 1) === 1;
@@ -138,7 +145,7 @@ window.DDOM = window.DDOM || {};
         var cg = (csig[1] + csig[4] + csig[7] + csig[10]) * 0.25;
         var cb = (csig[2] + csig[5] + csig[8] + csig[11]) * 0.25;
 
-        nearDist.fill(0);
+        nearPhotoDist.fill(0);
         var r0 = Math.max(0, row - effGap);
         var r1 = Math.min(rows - 1, row + effGap);
         var c0 = Math.max(0, col - effGap);
@@ -146,59 +153,64 @@ window.DDOM = window.DDOM || {};
         for (var nr = r0; nr <= r1; nr++) {
           var rowOff = nr * cols;
           for (var nc = c0; nc <= c1; nc++) {
-            var ex = grid[rowOff + nc];
-            if (ex >= 0) {
+            var ep = gridPhoto[rowOff + nc];
+            if (ep >= 0) {
               var md = Math.abs(nr - row) + Math.abs(nc - col);
-              if (nearDist[ex] === 0 || md < nearDist[ex]) nearDist[ex] = md;
+              if (nearPhotoDist[ep] === 0 || md < nearPhotoDist[ep]) nearPhotoDist[ep] = md;
             }
           }
         }
 
-        var bestId = (excludeId === 0 && nTiles > 1) ? 1 : 0;
+        var bestTid = 0;
         var bestScore = Infinity;
 
         for (var tid = 0; tid < nTiles; tid++) {
-          if (tid === excludeId && nTiles > 1) continue;
+          var pid = tilePhoto[tid];
+          if (pid === excludePhotoId && numPhotos > 1) continue;
 
-          // Fast lower-bound coarse rejection on average color (keeps 1,000+ photo solve under ~45ms!)
           var tr = tileAvg[tid * 3];
           var tg = tileAvg[tid * 3 + 1];
           var tb = tileAvg[tid * 3 + 2];
           var coarse = redmeanDistSq(cr, cg, cb, tr, tg, tb);
-          var nd = nearDist[tid];
+          var nd = nearPhotoDist[pid];
           var pen = nd > 0 ? (repeatPenalty / (nd * nd)) : 0;
-          var over = usage[tid] - targetAvg * 0.9;
+          var over = photoUsage[pid] - targetAvg * 0.9;
           if (over > 0) pen += over * usePenalty;
 
           if (coarse * 0.55 + pen >= bestScore) continue;
 
-          // Exact 2x2 sub-quadrant perceptual distance
-          var sc = sigDistance(csig, tileSigs[tid]) + pen;
+          var sc = sigDistance(csig, tiles[tid].sig) + pen;
           if (sc < bestScore) {
             bestScore = sc;
-            bestId = tid;
+            bestTid = tid;
           }
         }
 
-        grid[cellIdx] = bestId;
-        usage[bestId]++;
+        grid[cellIdx] = bestTid;
+        var winPid = tilePhoto[bestTid];
+        gridPhoto[cellIdx] = winPid;
+        photoUsage[winPid]++;
       }
     }
 
-    var uniqueUsed = 0;
-    for (var u = 0; u < nTiles; u++) {
-      if (usage[u] > 0) uniqueUsed++;
+    var uniquePhotosUsed = 0;
+    for (var u = 0; u < numPhotos; u++) {
+      if (photoUsage[u] > 0) uniquePhotosUsed++;
     }
-    return { grid: grid, uniqueUsed: uniqueUsed };
+    return { grid: grid, uniqueUsed: uniquePhotosUsed };
   }
 
   /**
-   * Assemble any target photo from the loaded Maggie catalog!
-   * `maxDim` controls the longer grid dimension (e.g., 36, 48, 64).
+   * Assemble any target photo from the loaded Maggie catalog in either 'pure' or 'perfected' mode!
    */
-  function assembleFromCatalog(catalog, targetPhotoId, maxDim, minGap) {
+  function assembleFromCatalog(catalog, targetPhotoId, maxDim, minGap, mode) {
     var target = catalog.photos[targetPhotoId];
     if (!target) throw new Error('Unknown photo id ' + targetPhotoId);
+
+    var usePerfected = mode === 'perfected' && catalog.perfectedTiles && catalog.perfectedTiles.length > 0;
+    var tilePool = usePerfected ? catalog.perfectedTiles : catalog.pureTiles;
+    var atlases = catalog.atlasImgs;
+    var atlasMeta = catalog.atlases;
 
     maxDim = Math.max(20, Math.min(76, maxDim || 48));
     var aspect = target.w / Math.max(1, target.h);
@@ -211,7 +223,6 @@ window.DDOM = window.DDOM || {};
       cols = Math.max(16, Math.round(maxDim * aspect));
     }
 
-    // Sample target portrait straight from local same-origin preview atlas (zero CORS, instant!)
     var pv = catalog.previewAtlas;
     var pvImg = catalog.previewImg;
     var slot = pv.slotPx;
@@ -221,12 +232,12 @@ window.DDOM = window.DDOM || {};
     var ph = target.ph;
 
     var sampled = sampleTargetGrid(pvImg, px, py, pw, ph, cols, rows);
-    var solved = solveGrid(sampled.cellSigs, catalog.tileSigs, cols, rows, {
-      excludeId: targetPhotoId,
-      minGap: minGap || 3
+    var solved = solveGrid(sampled.cellSigs, tilePool, catalog.photos.length, cols, rows, {
+      excludePhotoId: targetPhotoId,
+      minGap: minGap || 3,
+      perfected: usePerfected
     });
 
-    // Render crisp same-origin reference canvas for instant Compare & zoom-out glaze
     var refCanvas = document.createElement('canvas');
     var refMax = 900;
     var rw = aspect >= 1 ? refMax : Math.round(refMax * aspect);
@@ -240,18 +251,20 @@ window.DDOM = window.DDOM || {};
 
     return {
       isCatalogMode: true,
+      mode: usePerfected ? 'perfected' : 'pure',
       targetId: targetPhotoId,
       targetPhoto: target,
       cols: cols,
       rows: rows,
       aspect: aspect,
       grid: solved.grid,
+      tiles: tilePool,
       uniqueUsed: solved.uniqueUsed,
       cellColors: sampled.cellColors,
       refCanvas: refCanvas,
       highResTargetImg: null,
-      atlases: catalog.atlasImgs,
-      atlasMeta: catalog.atlases,
+      atlases: atlases,
+      atlasMeta: atlasMeta,
       photos: catalog.photos
     };
   }
@@ -290,7 +303,7 @@ window.DDOM = window.DDOM || {};
     probe.width = 4; probe.height = 4;
     var pCtx = probe.getContext('2d', { willReadFrequently: true });
 
-    var tileSigs = new Array(nTiles);
+    var tiles = new Array(nTiles);
     var photos = new Array(nTiles);
 
     for (var i = 0; i < nTiles; i++) {
@@ -322,18 +335,16 @@ window.DDOM = window.DDOM || {};
           sig[qi++] = rs * 0.25; sig[qi++] = gs * 0.25; sig[qi++] = bs * 0.25;
         }
       }
-      tileSigs[i] = sig;
       photos[i] = {
         id: i,
         d: '',
         caption: item.caption || cleanCaption(item.name, i),
         fullUrl: item.src,
+        hdThumbUrl: item.src,
         w: iw,
-        h: ih,
-        a: 0,
-        ax: ax,
-        ay: ay
+        h: ih
       };
+      tiles[i] = { p: i, a: 0, ax: ax, ay: ay, sig: sig };
 
       if (i % 16 === 0) {
         onProgress(0.05 + (i / nTiles) * 0.55, 'Preparing photos (' + (i + 1) + '/' + nTiles + ')…');
@@ -345,20 +356,22 @@ window.DDOM = window.DDOM || {};
     await yieldFrame();
 
     var sampled = sampleTargetGrid(masterImg, 0, 0, mw, mh, cols, rows);
-    var solved = solveGrid(sampled.cellSigs, tileSigs, cols, rows, {
-      excludeId: -1,
+    var solved = solveGrid(sampled.cellSigs, tiles, nTiles, cols, rows, {
+      excludePhotoId: -1,
       minGap: minGap
     });
 
     onProgress(1, 'Ready!');
     return {
       isCatalogMode: false,
+      mode: 'custom',
       targetId: -1,
       targetPhoto: { id: -1, d: '', caption: 'Custom Maggie Portrait', fullUrl: masterSrc, w: mw, h: mh },
       cols: cols,
       rows: rows,
       aspect: aspect,
       grid: solved.grid,
+      tiles: tiles,
       uniqueUsed: solved.uniqueUsed,
       cellColors: sampled.cellColors,
       refCanvas: masterImg,

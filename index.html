@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=3">
 </head>
 <body>
   <div class="paper-grain" aria-hidden="true"></div>
@@ -28,6 +28,11 @@
         <span class="brand-title">Daily Dose of Maggie</span>
         <span class="brand-stats" id="mosaic-stats">Loading Maggie's photos…</span>
       </div>
+    </div>
+
+    <div class="mode-switch" id="mode-switch" role="group" aria-label="Mosaic mode">
+      <button type="button" class="mode-btn active" data-mode="pure" title="Full untouched solo Maggie photos (no extra cropping)">Pure Maggie</button>
+      <button type="button" class="mode-btn" data-mode="perfected" title="Color-perfected Maggie mosaic: crops up to 50% (always keeping Maggie in frame) for higher accuracy and more variety">Perfected</button>
     </div>
 
     <nav class="nav-actions" aria-label="Mosaic controls">
@@ -252,9 +257,9 @@
     </aside>
   </div>
 
-  <script src="js/mosaic-engine.js?v=2"></script>
-  <script src="js/viewer.js?v=2"></script>
-  <script src="js/studio.js?v=2"></script>
-  <script src="js/main.js?v=2"></script>
+  <script src="js/mosaic-engine.js?v=3"></script>
+  <script src="js/viewer.js?v=3"></script>
+  <script src="js/studio.js?v=3"></script>
+  <script src="js/main.js?v=3"></script>
 </body>
 </html>

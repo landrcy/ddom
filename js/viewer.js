@@ -86,8 +86,8 @@ window.DDOM = window.DDOM || {};
       state.worldW = state.mosaic.cols * state.tileUnit;
       state.worldH = state.mosaic.rows * state.tileUnit;
 
-      var topPad = state.vw < 780 ? 74 : 84;
-      var botPad = state.vw < 780 ? 112 : 94;
+      var topPad = state.vw < 1140 ? 104 : 84;
+      var botPad = state.vw < 780 ? 116 : 94;
       var sidePad = state.vw < 780 ? 20 : 48;
       var availW = Math.max(160, state.vw - sidePad * 2);
       var availH = Math.max(160, state.vh - topPad - botPad);
@@ -119,7 +119,7 @@ window.DDOM = window.DDOM || {};
       bakedCtx.imageSmoothingQuality = 'high';
 
       var grid = m.grid;
-      var photos = m.photos;
+      var tiles = m.tiles || m.photos;
       var atlases = m.atlases;
       var atlasMeta = m.atlasMeta;
 
@@ -128,14 +128,14 @@ window.DDOM = window.DDOM || {};
         var dy = r * tileDraw;
         for (var c = 0; c < m.cols; c++) {
           var tid = grid[rowOff + c];
-          var ph = photos[tid];
-          if (!ph) continue;
-          var aIdx = ph.a || 0;
+          var tlTile = tiles[tid];
+          if (!tlTile) continue;
+          var aIdx = tlTile.a || 0;
           var aImg = atlases[aIdx];
           var am = atlasMeta[aIdx];
           if (!aImg || !am) continue;
           var tp = am.tilePx;
-          bakedCtx.drawImage(aImg, ph.ax * tp, ph.ay * tp, tp, tp, c * tileDraw, dy, tileDraw, tileDraw);
+          bakedCtx.drawImage(aImg, tlTile.ax * tp, tlTile.ay * tp, tp, tp, c * tileDraw, dy, tileDraw, tileDraw);
         }
       }
       bakedReady = true;
@@ -270,8 +270,8 @@ window.DDOM = window.DDOM || {};
 
     function resetView(animate) {
       if (!state.mosaic) return;
-      var topPad = state.vw < 780 ? 74 : 84;
-      var botPad = state.vw < 780 ? 112 : 94;
+      var topPad = state.vw < 1140 ? 104 : 84;
+      var botPad = state.vw < 780 ? 116 : 94;
       var cy = state.worldH * 0.5 + ((topPad - botPad) * 0.5) / state.fitZoom * -0.35;
       flyTo(state.worldW * 0.5, cy, state.fitZoom, animate === false ? 0 : 520);
     }
@@ -412,6 +412,7 @@ window.DDOM = window.DDOM || {};
       var atlases = m.atlases;
       var atlasMeta = m.atlasMeta;
       var photos = m.photos;
+      var tiles = m.tiles || m.photos;
       var grid = m.grid;
 
       if (state.anim) {
@@ -430,9 +431,9 @@ window.DDOM = window.DDOM || {};
             if (p <= 0) continue;
             var ep = easeOutCubic(p);
             var tid = grid[idx];
-            var ph = photos[tid];
-            if (!ph) continue;
-            var aIdx = ph.a || 0;
+            var tileObj = tiles[tid];
+            if (!tileObj) continue;
+            var aIdx = tileObj.a || 0;
             var aImg = atlases[aIdx];
             var am = atlasMeta[aIdx];
             if (!aImg || !am) continue;
@@ -443,7 +444,7 @@ window.DDOM = window.DDOM || {};
             var sc = 0.32 + 0.68 * ep;
             var sz = tileScreenPx * sc;
             ctx.globalAlpha = Math.min(1, p * 1.45);
-            ctx.drawImage(aImg, ph.ax * tp, ph.ay * tp, tp, tp, cx2 - sz * 0.5, cy2 - sz * 0.5, sz + 0.4, sz + 0.4);
+            ctx.drawImage(aImg, tileObj.ax * tp, tileObj.ay * tp, tp, tp, cx2 - sz * 0.5, cy2 - sz * 0.5, sz + 0.4, sz + 0.4);
           }
         }
         ctx.restore();
@@ -454,7 +455,7 @@ window.DDOM = window.DDOM || {};
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(bakedCanvas, tl[0], tl[1], mwPx, mhPx);
       } else {
-        /* Crisp per-tile rendering + seamless center-cropped HD sharpening when zoomed deep */
+        /* Crisp per-tile rendering + seamless crop-exact HD sharpening when zoomed deep */
         var gap = tileScreenPx > 54 ? Math.min(2.5, (tileScreenPx - 54) * 0.04) : 0;
         var wantHd = tileScreenPx >= 108;
         state.visibleIds.clear();
@@ -465,41 +466,52 @@ window.DDOM = window.DDOM || {};
           for (var c2 = visC0; c2 <= visC1; c2++) {
             var idx2 = rowOff2 + c2;
             var tid2 = grid[idx2];
-            var ph2 = photos[tid2];
-            if (!ph2) continue;
+            var tile2 = tiles[tid2];
+            if (!tile2) continue;
+            var ph2 = photos[typeof tile2.p === 'number' ? tile2.p : tid2];
             var dx = tl[0] + c2 * tileScreenPx;
-            if (wantHd) state.visibleIds.add(ph2.id);
+            if (wantHd && ph2) state.visibleIds.add(ph2.id);
 
-            var hd = wantHd ? state.hdCache.get(ph2.id) : null;
+            var hd = (wantHd && ph2) ? state.hdCache.get(ph2.id) : null;
             if (hd) {
-              /* Refresh LRU order so visible tiles stay hot, and draw EXACT center-square crop matching atlas */
+              /* Refresh LRU order so visible tiles stay hot, and draw EXACT tile crop rect matching atlas */
               state.hdCache.delete(ph2.id);
               state.hdCache.set(ph2.id, hd);
               var iw = hd.naturalWidth || hd.width;
               var ih = hd.naturalHeight || hd.height;
-              var side = Math.min(iw, ih);
-              var sx = (iw - side) * 0.5;
-              var sy = (ih - side) * 0.5;
+              var sx, sy, sw, sh;
+              if (tile2.cr) {
+                sx = tile2.cr[0] * iw;
+                sy = tile2.cr[1] * ih;
+                sw = tile2.cr[2] * iw;
+                sh = tile2.cr[3] * ih;
+              } else {
+                var side = Math.min(iw, ih);
+                sx = (iw - side) * 0.5;
+                sy = (ih - side) * 0.5;
+                sw = side;
+                sh = side;
+              }
               ctx.drawImage(
                 hd,
-                sx, sy, side, side,
+                sx, sy, sw, sh,
                 dx + gap * 0.5, dy + gap * 0.5,
                 tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35
               );
             } else {
-              var aIdx2 = ph2.a || 0;
+              var aIdx2 = tile2.a || 0;
               var aImg2 = atlases[aIdx2];
               var am2 = atlasMeta[aIdx2];
               if (aImg2 && am2) {
                 var tp2 = am2.tilePx;
                 ctx.drawImage(
                   aImg2,
-                  ph2.ax * tp2, ph2.ay * tp2, tp2, tp2,
+                  tile2.ax * tp2, tile2.ay * tp2, tp2, tp2,
                   dx + gap * 0.5, dy + gap * 0.5,
                   tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35
                 );
               }
-              if (wantHd) requestHdTile(ph2);
+              if (wantHd && ph2) requestHdTile(ph2);
             }
           }
         }
@@ -573,17 +585,18 @@ window.DDOM = window.DDOM || {};
       og.imageSmoothingEnabled = true;
       og.imageSmoothingQuality = 'high';
 
+      var tiles = m.tiles || m.photos;
       for (var r = 0; r < m.rows; r++) {
         var rowOff = r * m.cols;
         for (var c = 0; c < m.cols; c++) {
-          var ph = m.photos[m.grid[rowOff + c]];
-          if (!ph) continue;
-          var aIdx = ph.a || 0;
+          var tObj = tiles[m.grid[rowOff + c]];
+          if (!tObj) continue;
+          var aIdx = tObj.a || 0;
           var aImg = m.atlases[aIdx];
           var am = m.atlasMeta[aIdx];
           if (!aImg || !am) continue;
           var tp = am.tilePx;
-          og.drawImage(aImg, ph.ax * tp, ph.ay * tp, tp, tp, pad + c * tileOut, pad + r * tileOut, tileOut, tileOut);
+          og.drawImage(aImg, tObj.ax * tp, tObj.ay * tp, tp, tp, pad + c * tileOut, pad + r * tileOut, tileOut, tileOut);
         }
       }
 

@@ -1,8 +1,10 @@
-/* DDOM — Daily Dose of Maggie: Main Controller
-   Loads the precomputed compact Maggie multi-atlas catalog (data/photos.json),
-   automatically assembles Today's Daily Dose of Maggie out of all the OTHER Maggie photos,
-   powers the "Random Maggie" button, recursive "Build Mosaic of This Photo" Lightbox,
-   Gallery archive, keyboard shortcuts, and smooth zoom/pan controls. */
+/* DDOM — Daily Dose of Maggie: Dual-Mode Main Controller
+   Loads the precomputed compact Maggie multi-atlas catalog (data/photos.json v3),
+   supports two distinct modes:
+     - "pure":      Full untouched solo Maggie photos (zero extra cropping)
+     - "perfected": Expanded Maggie tile pool cropping up to 50% (always keeping Maggie
+                    in frame) + verified face-free rescued Maggie photos for sharper accuracy
+   Powers Today's Daily Dose, Random Maggie, recursive Lightbox, Gallery, and Studio. */
 (function () {
   'use strict';
 
@@ -13,6 +15,7 @@
   var statsEl = document.getElementById('mosaic-stats');
   var hoverPill = document.getElementById('hover-pill');
 
+  var modeSwitch = document.getElementById('mode-switch');
   var btnRandom = document.getElementById('btn-random-maggie');
   var btnDaily = document.getElementById('btn-daily-dose');
   var btnGallery = document.getElementById('btn-gallery');
@@ -58,10 +61,13 @@
   var btnGalMore = document.getElementById('btn-gallery-more');
 
   var catalog = null;
+  var atlasPromises = [];
+  var mosaicStyle = 'pure'; /* 'pure' | 'perfected' */
+  var userTouchedHarmony = false;
   var gridSize = 48;
   var antiRepeat = 3;
   var currentTargetId = 0;
-  var currentMode = 'daily'; /* 'daily' | 'random' | 'picked' | 'custom' */
+  var currentSource = 'daily'; /* 'daily' | 'random' | 'picked' | 'custom' */
   var recentHistory = [];
   var lbState = { photoId: -1, cellIdx: -1 };
   var galleryRendered = 0;
@@ -74,6 +80,29 @@
       im.onerror = function () { reject(new Error('Failed to load ' + src)); };
       im.src = src;
     });
+  }
+
+  function ensureAtlas(idx) {
+    if (!catalog) return Promise.resolve(null);
+    if (catalog.atlasImgs[idx]) return Promise.resolve(catalog.atlasImgs[idx]);
+    if (!atlasPromises[idx]) {
+      atlasPromises[idx] = loadImg(catalog.atlases[idx].src).then(function (im) {
+        catalog.atlasImgs[idx] = im;
+        return im;
+      });
+    }
+    return atlasPromises[idx];
+  }
+
+  function ensureModeAtlases(style) {
+    if (!catalog) return Promise.resolve();
+    var needed = [];
+    for (var i = 0; i < catalog.atlases.length; i++) {
+      if (style === 'perfected' || catalog.atlases[i].tier !== 'perfected') {
+        needed.push(ensureAtlas(i));
+      }
+    }
+    return Promise.all(needed);
   }
 
   /* Deterministic hash from today's local date (YYYY-MM-DD) for Daily Dose of Maggie */
@@ -94,11 +123,16 @@
     return h >>> 0;
   }
 
+  function getActivePhotoCount() {
+    if (!catalog) return 0;
+    return mosaicStyle === 'perfected' ? catalog.photos.length : catalog.pureCount;
+  }
+
   function getDailyPhotoId(cat) {
     var pool = (cat.featuredIds && cat.featuredIds.length) ? cat.featuredIds : null;
     var h = hashString('ddom-maggie-' + todayKey());
     if (pool) return pool[h % pool.length];
-    return h % cat.photos.length;
+    return h % cat.pureCount;
   }
 
   function formatDatePretty(iso) {
@@ -114,13 +148,13 @@
   function photoFullUrl(ph, size) {
     if (!ph) return '';
     if (ph.u) return ph.u + '=w' + (size || 1600) + '-no';
-    return ph.fullUrl || '';
+    return ph.src || ph.fullUrl || '';
   }
 
   function photoSquareThumbUrl(ph, size) {
     if (!ph) return '';
     if (ph.u) return ph.u + '=w' + (size || 240) + '-h' + (size || 240) + '-c-no';
-    return ph.fullUrl || '';
+    return ph.src || ph.fullUrl || '';
   }
 
   /* Extract a crisp dataURL thumbnail from the local atlas so UI cards never stall */
@@ -136,6 +170,22 @@
     return c.toDataURL('image/jpeg', 0.85);
   }
 
+  function syncModeButtons() {
+    if (!modeSwitch) return;
+    modeSwitch.querySelectorAll('.mode-btn').forEach(function (btn) {
+      var active = btn.dataset.mode === mosaicStyle;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+  }
+
+  function applyDefaultHarmonyForMode(style) {
+    if (userTouchedHarmony) return;
+    var val = style === 'perfected' ? 10 : 20;
+    harmonySlider.value = String(val);
+    viewer.setHarmony(val / 100);
+  }
+
   var viewer = DDOM.createViewer(canvas, {
     onZoomChange: function (pct) {
       btnZoomFit.textContent = pct + '%';
@@ -147,7 +197,10 @@
         return;
       }
       var tid = m.grid[cellIdx];
-      var ph = m.photos[tid];
+      var tiles = m.tiles || m.photos;
+      var tile = tiles[tid];
+      var pid = tile && typeof tile.p === 'number' ? tile.p : tid;
+      var ph = m.photos[pid];
       if (!ph) {
         hoverPill.classList.remove('visible');
         return;
@@ -162,23 +215,36 @@
       var m = viewer.getMosaic();
       if (!m) return;
       var tid = m.grid[cellIdx];
-      openLightbox(tid, cellIdx);
+      var tiles = m.tiles || m.photos;
+      var tile = tiles[tid];
+      var pid = tile && typeof tile.p === 'number' ? tile.p : tid;
+      openLightbox(pid, cellIdx);
     }
   });
 
-  function updateHudForMosaic(m, mode) {
-    var totalTiles = m.cols * m.rows;
+  function updateHudForMosaic(m, sourceKind) {
     var dateTxt = m.targetPhoto && m.targetPhoto.d ? formatDatePretty(m.targetPhoto.d) : (m.targetPhoto ? m.targetPhoto.caption : 'Maggie');
-    statsEl.textContent =
-      m.cols + '×' + m.rows + ' (' + totalTiles.toLocaleString() + ' tiles) · ' +
-      m.uniqueUsed.toLocaleString() + ' other Maggie photos';
+    if (m.mode === 'perfected') {
+      statsEl.textContent =
+        'Perfected · ' + m.cols + '×' + m.rows + ' · ' +
+        m.uniqueUsed.toLocaleString() + ' Maggie photos (' +
+        m.tiles.length.toLocaleString() + ' crops)';
+    } else if (m.mode === 'custom') {
+      statsEl.textContent =
+        'Custom · ' + m.cols + '×' + m.rows + ' · ' +
+        m.uniqueUsed.toLocaleString() + ' photos';
+    } else {
+      statsEl.textContent =
+        'Pure · ' + m.cols + '×' + m.rows + ' · ' +
+        m.uniqueUsed.toLocaleString() + ' untouched Maggie photos';
+    }
 
     dailyCard.classList.remove('hidden-card');
-    if (mode === 'daily') {
+    if (sourceKind === 'daily') {
       dailyEyebrow.textContent = "Today's Dose · " + formatDatePretty(todayKey());
-    } else if (mode === 'random') {
+    } else if (sourceKind === 'random') {
       dailyEyebrow.textContent = 'Random Maggie #' + (m.targetId + 1);
-    } else if (mode === 'picked') {
+    } else if (sourceKind === 'picked') {
       dailyEyebrow.textContent = 'Maggie #' + (m.targetId + 1);
     } else {
       dailyEyebrow.textContent = 'Custom Mosaic';
@@ -191,19 +257,59 @@
     }
   }
 
-  function assemblePhoto(photoId, mode, animate) {
+  function assemblePhoto(photoId, sourceKind, animate) {
     if (!catalog) return;
+    /* Keep Pure Maggie strictly within untouched solo photos */
+    if (mosaicStyle === 'pure' && photoId >= catalog.pureCount) {
+      photoId = getDailyPhotoId(catalog);
+    }
     currentTargetId = photoId;
-    currentMode = mode || 'random';
+    currentSource = sourceKind || 'random';
 
-    var m = DDOM.engine.assembleFromCatalog(catalog, photoId, gridSize, antiRepeat);
+    var m = DDOM.engine.assembleFromCatalog(catalog, photoId, gridSize, antiRepeat, mosaicStyle);
     viewer.setMosaic(m, animate !== false);
-    updateHudForMosaic(m, currentMode);
+    updateHudForMosaic(m, currentSource);
+  }
+
+  async function setMosaicStyle(nextStyle, animate) {
+    nextStyle = nextStyle === 'perfected' ? 'perfected' : 'pure';
+    if (nextStyle === mosaicStyle && viewer.getMosaic()) return;
+    mosaicStyle = nextStyle;
+    syncModeButtons();
+    applyDefaultHarmonyForMode(mosaicStyle);
+
+    /* Reset gallery DOM so it shows the active mode's photo set next time it opens */
+    galleryRendered = 0;
+    galGrid.innerHTML = '';
+
+    if (!catalog) return;
+    var needsFetch = false;
+    for (var i = 0; i < catalog.atlases.length; i++) {
+      if (mosaicStyle === 'perfected' && !catalog.atlasImgs[i]) needsFetch = true;
+    }
+    if (needsFetch) {
+      loaderText.textContent = 'Loading Perfected Maggie crops…';
+      loaderEl.classList.remove('done');
+    }
+    await ensureModeAtlases(mosaicStyle);
+    if (needsFetch) {
+      loaderEl.classList.add('done');
+    }
+
+    if (currentSource !== 'custom') {
+      var targetId = currentTargetId;
+      if (mosaicStyle === 'pure' && targetId >= catalog.pureCount) {
+        targetId = getDailyPhotoId(catalog);
+        currentSource = 'daily';
+      }
+      assemblePhoto(targetId, currentSource, animate !== false);
+    }
   }
 
   function pickRandomPhoto() {
-    if (!catalog || catalog.photos.length < 2) return;
-    var n = catalog.photos.length;
+    if (!catalog) return;
+    var n = getActivePhotoCount();
+    if (n < 2) return;
     var id = currentTargetId;
     var tries = 0;
     while ((id === currentTargetId || recentHistory.indexOf(id) >= 0) && tries < 40) {
@@ -229,25 +335,30 @@
 
     lbImg.src = photoFullUrl(ph, 1600);
     lbImg.alt = ph.d ? ('Maggie on ' + formatDatePretty(ph.d)) : (ph.caption || 'Maggie');
-    lbKicker.textContent = 'Maggie Photo #' + (ph.id + 1) + ' of ' + m.photos.length.toLocaleString();
+
+    var poolTotal = m.isCatalogMode ? getActivePhotoCount() : m.photos.length;
+    var kickerExtra = ph.pure === false ? ' · Cropped to Maggie' : '';
+    lbKicker.textContent = 'Maggie Photo #' + (ph.id + 1) + ' of ' + poolTotal.toLocaleString() + kickerExtra;
     lbTitle.textContent = ph.d ? formatDatePretty(ph.d) : (ph.caption || ('Maggie #' + (ph.id + 1)));
 
     if (lbState.cellIdx >= 0) {
       var col = lbState.cellIdx % m.cols;
       var row = Math.floor(lbState.cellIdx / m.cols);
-      lbSub.textContent = 'Tile at Row ' + (row + 1) + ', Column ' + (col + 1) + ' of ' + m.cols + '×' + m.rows;
+      var tileObj = (m.tiles || m.photos)[m.grid[lbState.cellIdx]];
+      var cropNote = (m.mode === 'perfected' && tileObj && tileObj.cr) ? ' · Perfected ≤50% crop' : '';
+      lbSub.textContent = 'Tile at Row ' + (row + 1) + ', Column ' + (col + 1) + ' of ' + m.cols + '×' + m.rows + cropNote;
       lbLocator.hidden = false;
       lbLocate.hidden = false;
       lbMinimapImg.src = m.refCanvas && m.refCanvas.toDataURL ? m.refCanvas.toDataURL('image/jpeg', 0.72) : (m.targetPhoto.fullUrl || '');
       lbMinimapPin.style.left = (((col + 0.5) / m.cols) * 100).toFixed(2) + '%';
       lbMinimapPin.style.top = (((row + 0.5) / m.rows) * 100).toFixed(2) + '%';
     } else {
-      lbSub.textContent = (ph.w && ph.h) ? (ph.w + ' × ' + ph.h + ' original') : 'Maggie’s Archive';
+      lbSub.textContent = (ph.w && ph.h) ? (ph.w + ' × ' + ph.h + (ph.pure === false ? ' cropped Maggie frame' : ' original')) : 'Maggie’s Archive';
       lbLocator.hidden = true;
       lbLocate.hidden = true;
     }
 
-    lbAssemble.hidden = !catalog || photoId < 0 || photoId >= catalog.photos.length;
+    lbAssemble.hidden = !catalog || photoId < 0 || photoId >= getActivePhotoCount();
     lbOpenHd.href = photoFullUrl(ph, 2400);
     lbBackdrop.hidden = false;
   }
@@ -259,10 +370,14 @@
   function stepLightbox(dir) {
     var m = viewer.getMosaic();
     if (!m || !m.photos.length) return;
-    var nextId = (lbState.photoId + dir + m.photos.length) % m.photos.length;
+    var count = m.isCatalogMode ? getActivePhotoCount() : m.photos.length;
+    var nextId = (lbState.photoId + dir + count) % count;
+    var tiles = m.tiles || m.photos;
     var foundCell = -1;
     for (var i = 0; i < m.grid.length; i++) {
-      if (m.grid[i] === nextId) { foundCell = i; break; }
+      var t = tiles[m.grid[i]];
+      var pid = t && typeof t.p === 'number' ? t.p : m.grid[i];
+      if (pid === nextId) { foundCell = i; break; }
     }
     openLightbox(nextId, foundCell);
   }
@@ -287,8 +402,9 @@
   /* ---------- Gallery Archive Modal ---------- */
   function appendGalleryBatch() {
     if (!catalog) return;
+    var limit = getActivePhotoCount();
     var frag = document.createDocumentFragment();
-    var end = Math.min(catalog.photos.length, galleryRendered + GALLERY_PAGE);
+    var end = Math.min(limit, galleryRendered + GALLERY_PAGE);
     for (var i = galleryRendered; i < end; i++) {
       (function (ph) {
         var card = document.createElement('button');
@@ -313,12 +429,17 @@
     }
     galGrid.appendChild(frag);
     galleryRendered = end;
-    galFoot.hidden = galleryRendered >= catalog.photos.length;
+    galFoot.hidden = galleryRendered >= limit;
   }
 
   function openGallery() {
     if (!catalog) return;
-    galSub.textContent = catalog.photos.length.toLocaleString() + ' photos of Maggie — click any photo to view full size or assemble a mosaic from it.';
+    var limit = getActivePhotoCount();
+    if (mosaicStyle === 'perfected') {
+      galSub.textContent = limit.toLocaleString() + ' Maggie photos (' + catalog.perfectedTiles.length.toLocaleString() + ' Perfected crops) — click any photo to inspect or assemble.';
+    } else {
+      galSub.textContent = limit.toLocaleString() + ' untouched solo photos of Maggie — click any photo to view full size or assemble a mosaic from it.';
+    }
     if (galleryRendered === 0) appendGalleryBatch();
     galBackdrop.hidden = false;
   }
@@ -328,6 +449,14 @@
   galBackdrop.addEventListener('click', function (e) { if (e.target === galBackdrop) galBackdrop.hidden = true; });
 
   /* ---------- Wire Topbar & Dock Controls ---------- */
+  if (modeSwitch) {
+    modeSwitch.addEventListener('click', function (e) {
+      var btn = e.target.closest('.mode-btn');
+      if (!btn || !btn.dataset.mode) return;
+      setMosaicStyle(btn.dataset.mode, true);
+    });
+  }
+
   btnRandom.addEventListener('click', pickRandomPhoto);
   btnDaily.addEventListener('click', function () {
     if (!catalog) return;
@@ -352,12 +481,13 @@
     gridSeg.querySelectorAll('.seg-btn').forEach(function (el) {
       el.classList.toggle('active', parseInt(el.dataset.grid, 10) === gridSize);
     });
-    if (catalog && currentMode !== 'custom') {
-      assemblePhoto(currentTargetId, currentMode, true);
+    if (catalog && currentSource !== 'custom') {
+      assemblePhoto(currentTargetId, currentSource, true);
     }
   });
 
   harmonySlider.addEventListener('input', function () {
+    userTouchedHarmony = true;
     viewer.setHarmony(parseInt(harmonySlider.value, 10) / 100);
   });
   viewer.setHarmony(parseInt(harmonySlider.value, 10) / 100);
@@ -388,18 +518,20 @@
   var studio = DDOM.initStudio({
     viewer: viewer,
     getCatalog: function () { return catalog; },
+    getMosaicStyle: function () { return mosaicStyle; },
+    ensureModeAtlases: ensureModeAtlases,
     setGridDetail: function (cols, gap) {
       gridSize = cols;
       antiRepeat = gap;
       gridSeg.querySelectorAll('.seg-btn').forEach(function (el) {
         el.classList.toggle('active', parseInt(el.dataset.grid, 10) === gridSize);
       });
-      if (catalog && currentMode !== 'custom') {
-        assemblePhoto(currentTargetId, currentMode, true);
+      if (catalog && currentSource !== 'custom') {
+        assemblePhoto(currentTargetId, currentSource, true);
       }
     },
     applyCustomMosaic: function (m) {
-      currentMode = 'custom';
+      currentSource = 'custom';
       currentTargetId = -1;
       viewer.setMosaic(m, true);
       updateHudForMosaic(m, 'custom');
@@ -442,68 +574,126 @@
     if (e.key === ' ') stopPeek();
   });
 
+  function hydrateTileList(rawList) {
+    var out = new Array(rawList.length);
+    for (var i = 0; i < rawList.length; i++) {
+      var t = rawList[i];
+      var s = t.s;
+      var f = new Float32Array(12);
+      for (var k = 0; k < 12; k++) f[k] = s[k];
+      out[i] = {
+        p: t.p,
+        a: t.a,
+        ax: t.ax,
+        ay: t.ay,
+        cr: t.cr || null,
+        sig: f
+      };
+    }
+    return out;
+  }
+
+  /* Compute average tile-to-cell RGB error for quantitative Pure vs Perfected verification */
+  function computeCurrentMosaicError() {
+    var m = viewer.getMosaic();
+    if (!m || !m.cellColors || !m.grid || !m.tiles) return null;
+    var tot = 0;
+    for (var i = 0; i < m.grid.length; i++) {
+      var hex = m.cellColors[i];
+      var r1 = parseInt(hex.slice(1, 3), 16);
+      var g1 = parseInt(hex.slice(3, 5), 16);
+      var b1 = parseInt(hex.slice(5, 7), 16);
+      var s = m.tiles[m.grid[i]].sig;
+      var r2 = (s[0] + s[3] + s[6] + s[9]) * 0.25;
+      var g2 = (s[1] + s[4] + s[7] + s[10]) * 0.25;
+      var b2 = (s[2] + s[5] + s[8] + s[11]) * 0.25;
+      tot += Math.hypot(r1 - r2, g1 - g2, b1 - b2);
+    }
+    return tot / Math.max(1, m.grid.length);
+  }
+
   /* ---------- Bootstrap Catalog & Assemble Today's Dose of Maggie ---------- */
   async function boot() {
     try {
+      var qs = new URLSearchParams(location.search);
+      if (qs.get('mode') === 'perfected') {
+        mosaicStyle = 'perfected';
+      }
+      syncModeButtons();
+      applyDefaultHarmonyForMode(mosaicStyle);
+
       loaderText.textContent = 'Loading Maggie’s photo archive…';
-      var res = await fetch('data/photos.json');
+      var res = await fetch('data/photos.json?v=3');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       var data = await res.json();
 
-      loaderText.textContent = 'Loading ' + data.photos.length.toLocaleString() + ' Maggie tiles…';
-      var imgPromises = data.atlases.map(function (a) { return loadImg(a.src); });
-      imgPromises.push(loadImg(data.previewAtlas.src));
-      var loadedImgs = await Promise.all(imgPromises);
-
-      var atlasImgs = loadedImgs.slice(0, data.atlases.length);
-      var previewImg = loadedImgs[loadedImgs.length - 1];
-
-      /* Hydrate compact 12-float quadrant signatures & HD URLs */
-      var tileSigs = new Array(data.photos.length);
+      var pureCount = data.pureCount || data.photos.length;
       for (var i = 0; i < data.photos.length; i++) {
         var ph = data.photos[i];
         ph.id = i;
+        ph.pure = ph.pure !== 0;
         ph.fullUrl = ph.u ? (ph.u + '=w1600-no') : (ph.src || '');
         ph.hdThumbUrl = ph.u ? (ph.u + '=w380-no') : (ph.src || '');
-        var s = ph.s;
-        var f = new Float32Array(12);
-        for (var k = 0; k < 12; k++) f[k] = s[k];
-        tileSigs[i] = f;
       }
+
+      var pureTiles = hydrateTileList(data.pureTiles || []);
+      var perfectedTiles = hydrateTileList(data.perfectedTiles || data.pureTiles || []);
 
       catalog = {
         photos: data.photos,
+        pureCount: pureCount,
+        rescuedCount: data.rescuedCount || 0,
         featuredIds: data.featuredIds || null,
         atlases: data.atlases,
-        atlasImgs: atlasImgs,
+        atlasImgs: new Array(data.atlases.length),
         previewAtlas: data.previewAtlas,
-        previewImg: previewImg,
-        tileSigs: tileSigs
+        previewImg: null,
+        pureTiles: pureTiles,
+        perfectedTiles: perfectedTiles
       };
+      atlasPromises = new Array(data.atlases.length);
 
-      /* Support optional ?photo=N or ?random query param for sharing/testing */
-      var qs = new URLSearchParams(location.search);
+      loaderText.textContent = mosaicStyle === 'perfected'
+        ? ('Loading ' + perfectedTiles.length.toLocaleString() + ' Perfected Maggie tiles…')
+        : ('Loading ' + pureTiles.length.toLocaleString() + ' Pure Maggie tiles…');
+
+      var pvPromise = loadImg(data.previewAtlas.src).then(function (im) {
+        catalog.previewImg = im;
+      });
+      await Promise.all([ensureModeAtlases(mosaicStyle), pvPromise]);
+
+      /* Quietly warm the Perfected atlases in the background so switching modes is instant */
+      if (mosaicStyle === 'pure') {
+        setTimeout(function () { ensureModeAtlases('perfected').catch(function () {}); }, 600);
+      }
+
       var startId = getDailyPhotoId(catalog);
-      var startMode = 'daily';
+      var startSource = 'daily';
       if (qs.has('photo')) {
         var pid = parseInt(qs.get('photo'), 10);
-        if (!isNaN(pid) && pid >= 0 && pid < catalog.photos.length) {
+        if (!isNaN(pid) && pid >= 0 && pid < getActivePhotoCount()) {
           startId = pid;
-          startMode = 'picked';
+          startSource = 'picked';
         }
       } else if (qs.has('random')) {
-        startId = Math.floor(Math.random() * catalog.photos.length);
-        startMode = 'random';
+        startId = Math.floor(Math.random() * getActivePhotoCount());
+        startSource = 'random';
       }
 
       loaderText.textContent = 'Assembling Today’s Dose of Maggie…';
-      assemblePhoto(startId, startMode, true);
+      assemblePhoto(startId, startSource, true);
       loaderEl.classList.add('done');
 
       /* Expose tiny debug handle for automated verification */
       window.__ddom = {
         getCatalogCount: function () { return catalog ? catalog.photos.length : 0; },
+        getPureCount: function () { return catalog ? catalog.pureCount : 0; },
+        getPureTileCount: function () { return catalog ? catalog.pureTiles.length : 0; },
+        getPerfectedTileCount: function () { return catalog ? catalog.perfectedTiles.length : 0; },
+        getMode: function () { return mosaicStyle; },
+        setMode: function (m) { return setMosaicStyle(m, false); },
         getMosaic: function () { return viewer.getMosaic(); },
+        getAvgColorError: computeCurrentMosaicError,
         pickRandom: pickRandomPhoto,
         assemble: assemblePhoto,
         zoomIn: function () { viewer.zoomIn(); },

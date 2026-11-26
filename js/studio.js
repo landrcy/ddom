@@ -47,10 +47,15 @@ window.DDOM = window.DDOM || {};
 
     function updateCounts() {
       var cat = app.getCatalog();
+      var style = app.getMosaicStyle ? app.getMosaicStyle() : 'pure';
       if (customTileFiles.length > 0) {
         tileCountBadge.textContent = customTileFiles.length + ' custom photos selected';
       } else if (cat) {
-        tileCountBadge.textContent = 'Using Maggie’s ' + cat.photos.length.toLocaleString() + ' photos';
+        if (style === 'perfected' && cat.perfectedTiles) {
+          tileCountBadge.textContent = 'Using Maggie’s ' + cat.perfectedTiles.length.toLocaleString() + ' Perfected crops';
+        } else {
+          tileCountBadge.textContent = 'Using Maggie’s ' + (cat.pureCount || cat.photos.length).toLocaleString() + ' Pure photos';
+        }
       }
     }
 
@@ -171,16 +176,14 @@ window.DDOM = window.DDOM || {};
             }
           });
         } else if (cat) {
-          /* Build user's custom target photo using Maggie's entire photo archive as tiles!! */
+          /* Build user's custom target photo using Maggie's archive in the active Pure/Perfected mode! */
+          var activeStyle = app.getMosaicStyle ? app.getMosaicStyle() : 'pure';
+          if (app.ensureModeAtlases) await app.ensureModeAtlases(activeStyle);
           progFill.style.width = '55%';
           progText.textContent = 'Assembling your photo out of Maggie’s archive…';
           var mw = masterLoaded.img.naturalWidth || masterLoaded.img.width;
           var mh = masterLoaded.img.naturalHeight || masterLoaded.img.height;
-          var aspect = mw / Math.max(1, mh);
-          var gCols = aspect >= 1 ? cols : Math.max(16, Math.round(cols * aspect));
-          var gRows = aspect >= 1 ? Math.max(16, Math.round(cols / aspect)) : cols;
 
-          /* Sample via temporary preview-like canvas using buildFromFiles? Even cleaner: match directly against catalog! */
           var tmpCat = Object.assign({}, cat, {
             photos: cat.photos.concat([{
               id: cat.photos.length,
@@ -194,7 +197,7 @@ window.DDOM = window.DDOM || {};
             previewAtlas: { slotPx: Math.max(mw, mh) },
             previewImg: masterLoaded.img
           });
-          mosaic = window.DDOM.engine.assembleFromCatalog(tmpCat, cat.photos.length, cols, gap);
+          mosaic = window.DDOM.engine.assembleFromCatalog(tmpCat, cat.photos.length, cols, gap, activeStyle);
           mosaic.photos = cat.photos;
           mosaic.isCatalogMode = false;
           mosaic.highResTargetImg = masterLoaded.img;

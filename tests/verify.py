@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Automated end-to-end Playwright verification for DDOM — Daily Dose of Maggie.
+Automated end-to-end Playwright verification for DDOM — Daily Dose of Maggie (Dual-Mode v3).
 Checks:
   - Zero console / page / same-origin network errors
-  - Multi-atlas catalog loads cleanly and assembles Today's Daily Dose of Maggie
-  - Random Maggie button picks a different photo and excludes target photo from its own tiles
-  - Grid resolution toggle (36 / 48 / 64) re-assembles cleanly
-  - Deep zoom & clicking a tile opens HD Lightbox with mini-map
-  - Clicking "Build Mosaic of This Photo" re-assembles around the clicked tile
-  - Gallery & Export/Studio drawers open & close cleanly
-  - Responsive mobile viewport (390x844) with zero horizontal overflow
+  - Multi-atlas v3 catalog loads cleanly in Pure Maggie mode (500+ untouched solo photos)
+  - Photo-level target exclusion holds strictly in BOTH Pure Maggie and Perfected modes
+  - Switching to Perfected mode activates 1,200+ strict <=50% Maggie crops & lowers avg color error
+  - Deep zoom in Perfected mode (with custom tile.cr crops & HD sharpening) is rock-solid (shot_a == shot_b)
+  - Clicking a tile opens HD Lightbox & recursive "Build Mosaic of This Photo" works
+  - Switching back to Pure Maggie, Random Maggie, Grid 64 toggle, Gallery & Studio all work cleanly
+  - Responsive mobile viewport (390x844) with centered mode switch, zero overlap & zero overflow
 """
 import functools
 import os
@@ -19,13 +19,38 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from playwright.sync_api import sync_playwright
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SHOTS = "/home/antigravity/.gemini/jetski/brain/v1/default/jetski_remote_agents_3p_devbox/4fb94050-232b-4b60-ae8d-c21d413f9373/scratch/ddom_shots"
+SHOTS = "/home/antigravity/.gemini/jetski/brain/v1/default/jetski_remote_agents_3p_devbox/4fb94050-232b-4b60-ae8d-c21d413f9373/scratch/ddom_v3_shots"
 os.makedirs(SHOTS, exist_ok=True)
 
 
 class Quiet(SimpleHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+
+def mosaic_summary(page):
+    return page.evaluate("""() => {
+      const m = window.__ddom.getMosaic();
+      let selfUsed = 0;
+      let croppedTilesUsed = 0;
+      for (let i = 0; i < m.grid.length; i++) {
+        const t = m.tiles[m.grid[i]];
+        if (t.p === m.targetId) selfUsed++;
+        if (t.cr) croppedTilesUsed++;
+      }
+      return {
+        mode: m.mode,
+        targetId: m.targetId,
+        cols: m.cols,
+        rows: m.rows,
+        tilePool: m.tiles.length,
+        uniqueUsed: m.uniqueUsed,
+        selfUsed,
+        croppedTilesUsed,
+        avgErr: window.__ddom.getAvgColorError(),
+        tintVal: parseInt(document.getElementById('harmony-slider').value, 10)
+      };
+    }""")
 
 
 def main():
@@ -61,77 +86,101 @@ def main():
         page.wait_for_function("() => window.__ddom && window.__ddom.getMosaic()", timeout=15000)
         page.wait_for_timeout(1300)  # Let initial radial assembly wave finish
 
-        count = page.evaluate("() => window.__ddom.getCatalogCount()")
-        m1 = page.evaluate("""() => {
-          const m = window.__ddom.getMosaic();
-          let selfUsed = 0;
-          for (let i = 0; i < m.grid.length; i++) if (m.grid[i] === m.targetId) selfUsed++;
-          return {targetId: m.targetId, cols: m.cols, rows: m.rows, uniqueUsed: m.uniqueUsed, selfUsed};
-        }""")
-        check("Catalog loaded solo Maggie photos", count >= 100, f"{count} photos")
-        check("Today's Daily Dose assembled", m1["cols"] >= 20 and m1["rows"] >= 20, f"{m1['cols']}x{m1['rows']} using {m1['uniqueUsed']} photos")
-        check("Target photo strictly excluded from its own tiles", m1["selfUsed"] == 0, f"selfUsed={m1['selfUsed']}")
+        pure_cnt = page.evaluate("() => window.__ddom.getPureTileCount()")
+        perf_cnt = page.evaluate("() => window.__ddom.getPerfectedTileCount()")
+        m_pure = mosaic_summary(page)
+
+        check("Catalog loaded Pure & Perfected tile pools", pure_cnt >= 500 and perf_cnt > pure_cnt * 2,
+              f"pure={pure_cnt}, perfected={perf_cnt}")
+        check("Booted in Pure Maggie mode on Today's Dose",
+              m_pure["mode"] == "pure" and m_pure["cols"] >= 20 and m_pure["rows"] >= 20,
+              f"{m_pure['cols']}x{m_pure['rows']} using {m_pure['uniqueUsed']} photos, err={m_pure['avgErr']:.2f}")
+        check("Pure Maggie: target photo excluded & zero cropped tiles",
+              m_pure["selfUsed"] == 0 and m_pure["croppedTilesUsed"] == 0,
+              f"self={m_pure['selfUsed']}, cropped={m_pure['croppedTilesUsed']}")
 
         no_overflow = page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
         check("Desktop: zero horizontal overflow", no_overflow)
-        page.screenshot(path=os.path.join(SHOTS, "01_daily_dose.png"))
+        page.screenshot(path=os.path.join(SHOTS, "01_pure_daily.png"))
 
-        # Test Random Maggie button
-        page.click("#btn-random-maggie")
-        page.wait_for_timeout(1250)
-        m2 = page.evaluate("""() => {
-          const m = window.__ddom.getMosaic();
-          let selfUsed = 0;
-          for (let i = 0; i < m.grid.length; i++) if (m.grid[i] === m.targetId) selfUsed++;
-          return {targetId: m.targetId, cols: m.cols, rows: m.rows, uniqueUsed: m.uniqueUsed, selfUsed};
-        }""")
-        check("Random Maggie picked new photo & assembled", m2["targetId"] != m1["targetId"] and m2["selfUsed"] == 0, f"#{m1['targetId']} -> #{m2['targetId']}")
-        page.screenshot(path=os.path.join(SHOTS, "02_random_maggie.png"))
+        # Switch to Perfected mode via visible toggle button!
+        page.click('#mode-switch button[data-mode="perfected"]')
+        page.wait_for_function("() => window.__ddom.getMosaic().mode === 'perfected'", timeout=10000)
+        page.wait_for_timeout(1350)
+        m_perf = mosaic_summary(page)
 
-        # Test Grid Size toggle (64)
-        page.click('#grid-seg button[data-grid="64"]')
-        page.wait_for_timeout(1200)
-        m3 = page.evaluate("() => ({cols: window.__ddom.getMosaic().cols, rows: window.__ddom.getMosaic().rows})")
-        check("Grid size 64 toggle re-assembled", max(m3["cols"], m3["rows"]) == 64, f"{m3['cols']}x{m3['rows']}")
+        check("Perfected mode activated on same Daily Dose portrait",
+              m_perf["mode"] == "perfected" and m_perf["targetId"] == m_pure["targetId"],
+              f"tilePool={m_perf['tilePool']}, croppedUsed={m_perf['croppedTilesUsed']}, tint={m_perf['tintVal']}%")
+        check("Perfected mode: photo-level target exclusion holds across all crops",
+              m_perf["selfUsed"] == 0, f"selfUsed={m_perf['selfUsed']}")
+        check("Perfected mode: genuinely improves color accuracy over Pure Maggie",
+              m_perf["avgErr"] < m_pure["avgErr"],
+              f"pureErr={m_pure['avgErr']:.2f} -> perfErr={m_perf['avgErr']:.2f}")
+        check("Perfected mode: uses <=50% color-perfected sub-crops & lowers default tint",
+              m_perf["croppedTilesUsed"] > 100 and m_perf["tintVal"] == 10,
+              f"croppedUsed={m_perf['croppedTilesUsed']}, tint={m_perf['tintVal']}%")
+        page.screenshot(path=os.path.join(SHOTS, "02_perfected_daily.png"))
 
-        # Back to balanced 48 + Deep Zoom In to verify crystal-clear, rock-solid Maggie tiles (zero glitching/jumping!)
-        page.click('#grid-seg button[data-grid="48"]')
-        page.wait_for_timeout(1200)
+        # Deep zoom in Perfected mode (verify custom tile.cr crops render rock-solid with zero jumping!)
         for _ in range(6):
             page.click("#btn-zoom-in")
             page.wait_for_timeout(50)
-        page.wait_for_timeout(2200)
+        page.wait_for_timeout(2400)
         zoom_txt = page.locator("#btn-zoom-fit").inner_text()
-        check("Deep zoom renders zoomed Maggie tiles", zoom_txt != "100%", f"zoom={zoom_txt}")
+        check("Perfected deep zoom renders zoomed Maggie crops", zoom_txt != "100%", f"zoom={zoom_txt}")
         shot_a = page.screenshot()
-        page.wait_for_timeout(600)
+        page.wait_for_timeout(650)
         shot_b = page.screenshot()
-        check("Deep zoom rock-solid (zero tile jumping/glitching)", shot_a == shot_b)
-        with open(os.path.join(SHOTS, "03_zoomed_tiles.png"), "wb") as f:
+        check("Perfected deep zoom rock-solid (zero tile jumping/glitching)", shot_a == shot_b)
+        with open(os.path.join(SHOTS, "03_perfected_zoomed.png"), "wb") as f:
             f.write(shot_b)
 
-        # Click center tile to open Lightbox
+        # Click center tile in Perfected mode to open Lightbox
         page.mouse.click(640, 400)
         page.wait_for_timeout(700)
         lb_open = not page.locator("#lightbox").is_hidden()
-        check("Clicking tile opens HD Lightbox", lb_open)
+        check("Clicking Perfected tile opens HD Lightbox", lb_open)
         page.screenshot(path=os.path.join(SHOTS, "04_lightbox.png"))
 
-        # Click "Build Mosaic of This Photo" inside Lightbox (recursive Maggieception!)
-        prev_tid = m2["targetId"]
+        # Click "Build Mosaic of This Photo" inside Lightbox
+        prev_tid = m_perf["targetId"]
         page.click("#lb-assemble")
         page.wait_for_timeout(1250)
-        m4 = page.evaluate("() => window.__ddom.getMosaic().targetId")
-        check("Lightbox 'Build Mosaic of This Photo' switched target", m4 != prev_tid, f"#{prev_tid} -> #{m4}")
+        m_lb = mosaic_summary(page)
+        check("Lightbox 'Build Mosaic of This Photo' switched target in Perfected mode",
+              m_lb["targetId"] != prev_tid and m_lb["mode"] == "perfected" and m_lb["selfUsed"] == 0,
+              f"#{prev_tid} -> #{m_lb['targetId']}")
 
-        # Open Gallery modal
+        # Switch back to Pure Maggie + Random Maggie + Grid 64
+        page.click('#mode-switch button[data-mode="pure"]')
+        page.wait_for_function("() => window.__ddom.getMosaic().mode === 'pure'", timeout=10000)
+        page.wait_for_timeout(1200)
+        m_back = mosaic_summary(page)
+        check("Switching back to Pure Maggie restores pure pool & 20% default tint",
+              m_back["mode"] == "pure" and m_back["croppedTilesUsed"] == 0 and m_back["tintVal"] == 20,
+              f"tint={m_back['tintVal']}%")
+
+        page.click("#btn-random-maggie")
+        page.wait_for_timeout(1200)
+        m_rand = mosaic_summary(page)
+        check("Random Maggie picked new pure photo & excluded self",
+              m_rand["targetId"] != m_back["targetId"] and m_rand["selfUsed"] == 0,
+              f"#{m_back['targetId']} -> #{m_rand['targetId']}")
+
+        page.click('#grid-seg button[data-grid="64"]')
+        page.wait_for_timeout(1200)
+        m_64 = mosaic_summary(page)
+        check("Grid size 64 toggle re-assembled cleanly", max(m_64["cols"], m_64["rows"]) == 64,
+              f"{m_64['cols']}x{m_64['rows']}")
+
+        # Gallery & Studio drawers
         page.click("#btn-gallery")
         page.wait_for_timeout(500)
         gal_count = page.locator("#gallery-grid .gal-item").count()
         check("Gallery modal populated Maggie tiles", gal_count >= 50, f"{gal_count} loaded")
         page.click("#gal-close")
 
-        # Open Export/Studio drawer
         page.click("#btn-studio")
         page.wait_for_timeout(300)
         check("Studio drawer opened cleanly", not page.locator("#studio-backdrop").is_hidden())
@@ -139,18 +188,29 @@ def main():
 
         check("Desktop zero console/network errors", len(errors) == 0, str(errors))
 
-        # Mobile 390x844 check
+        # Mobile 390x844 check (including Perfected mode switch!)
         mctx = br.new_context(viewport={"width": 390, "height": 844})
         mpage = mctx.new_page()
         mpage.on("pageerror", lambda e: mob_errors.append(f"pageerror: {e}"))
         mpage.on("console", lambda m: mob_errors.append(f"console.{m.type}: {m.text}") if m.type == "error" else None)
         mpage.goto(url, wait_until="domcontentloaded")
         mpage.wait_for_function("() => window.__ddom && window.__ddom.getMosaic()", timeout=15000)
+        mpage.wait_for_timeout(1200)
+        mpage.click('#mode-switch button[data-mode="perfected"]')
+        mpage.wait_for_function("() => window.__ddom.getMosaic().mode === 'perfected'", timeout=10000)
         mpage.wait_for_timeout(1250)
+
         mob_overflow = mpage.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth")
-        check("Mobile 390x844: zero horizontal overflow", mob_overflow)
+        mode_rect = mpage.evaluate("""() => {
+          const r = document.getElementById('mode-switch').getBoundingClientRect();
+          const b = document.getElementById('topbar').getBoundingClientRect();
+          return { top: r.top, left: r.left, right: r.right, topbarBottom: b.bottom };
+        }""")
+        check("Mobile 390x844: zero horizontal overflow & mode pill visible on-screen",
+              mob_overflow and mode_rect["left"] >= 0 and mode_rect["right"] <= 390,
+              f"modeRect={mode_rect}")
         check("Mobile zero console/page errors", len(mob_errors) == 0, str(mob_errors))
-        mpage.screenshot(path=os.path.join(SHOTS, "05_mobile.png"))
+        mpage.screenshot(path=os.path.join(SHOTS, "05_mobile_perfected.png"))
 
         mctx.close()
         ctx.close()
