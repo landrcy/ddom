@@ -13,7 +13,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css?v=3">
+  <link rel="stylesheet" href="css/style.css?v=4">
 </head>
 <body>
   <div class="paper-grain" aria-hidden="true"></div>
@@ -48,7 +48,7 @@
         </svg>
         <span class="hide-sm">Today's Dose</span>
       </button>
-      <button type="button" class="btn btn-subtle" id="btn-gallery" title="Browse all Maggie photos">
+      <button type="button" class="btn btn-subtle" id="btn-gallery" title="Browse all Maggie photos & clearest shots">
         <svg class="ico" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
           <rect x="3" y="3" width="5.5" height="5.5" rx="1.2"/><rect x="11.5" y="3" width="5.5" height="5.5" rx="1.2"/><rect x="3" y="11.5" width="5.5" height="5.5" rx="1.2"/><rect x="11.5" y="11.5" width="5.5" height="5.5" rx="1.2"/>
         </svg>
@@ -75,6 +75,36 @@
     <!-- Subtle tile hover pill -->
     <div class="hover-pill" id="hover-pill" aria-hidden="true"></div>
 
+    <!-- Floating Settings Popover anchored above controls dock -->
+    <section class="settings-popover" id="settings-popover" role="dialog" aria-label="Mosaic settings" hidden>
+      <div class="settings-head">
+        <strong>Mosaic Settings</strong>
+        <span class="settings-meta" id="settings-unique-note">Unique photos available</span>
+      </div>
+
+      <label class="setting-row" for="toggle-no-reuse">
+        <div class="setting-copy">
+          <span class="setting-title">Don't reuse images</span>
+          <span class="setting-desc">Use every Maggie photo at most once (auto-fits grid if larger than archive).</span>
+        </div>
+        <span class="switch">
+          <input type="checkbox" id="toggle-no-reuse">
+          <span class="switch-track"></span>
+        </span>
+      </label>
+
+      <label class="setting-row" for="toggle-allow-rotate">
+        <div class="setting-copy">
+          <span class="setting-title">Allow image rotation</span>
+          <span class="setting-desc">Lets tiles rotate 90°, 180°, or 270° to match edges and contours more tightly.</span>
+        </div>
+        <span class="switch">
+          <input type="checkbox" id="toggle-allow-rotate">
+          <span class="switch-track"></span>
+        </span>
+      </label>
+    </section>
+
     <!-- Floating bottom-left viewport controls -->
     <aside class="controls-dock" id="controls-dock" aria-label="Zoom, grid density, and view controls">
       <div class="zoom-group">
@@ -90,9 +120,12 @@
       <span class="dock-sep" aria-hidden="true"></span>
 
       <div class="grid-seg" id="grid-seg" role="group" aria-label="Mosaic grid size" title="Number of tiles along the longer edge">
+        <button type="button" class="seg-btn" data-grid="24">24</button>
         <button type="button" class="seg-btn" data-grid="36">36</button>
         <button type="button" class="seg-btn active" data-grid="48">48</button>
         <button type="button" class="seg-btn" data-grid="64">64</button>
+        <button type="button" class="seg-btn hide-xs" data-grid="80">80</button>
+        <button type="button" class="seg-btn hide-xs" data-grid="96">96</button>
       </div>
 
       <span class="dock-sep hide-xs" aria-hidden="true"></span>
@@ -102,7 +135,15 @@
         <input type="range" id="harmony-slider" min="0" max="40" value="20">
       </label>
 
-      <span class="dock-sep hide-xs" aria-hidden="true"></span>
+      <span class="dock-sep" aria-hidden="true"></span>
+
+      <button type="button" class="peek-btn settings-btn" id="btn-settings" aria-expanded="false" aria-controls="settings-popover" title="Mosaic settings: No Reuse & Allow Rotation">
+        <svg class="ico-sm" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+          <path d="M4 6h8m4 0h-1M4 14h3m4 0h5M4 10h1m4 0h7" stroke-linecap="round"/><circle cx="13.5" cy="6" r="1.6"/><circle cx="7" cy="10" r="1.6"/><circle cx="9.5" cy="14" r="1.6"/>
+        </svg>
+        <span class="hide-xs">Settings</span>
+        <span class="settings-dot" id="settings-dot" hidden></span>
+      </button>
 
       <button type="button" class="peek-btn hide-xs" id="btn-peek" title="Hold to compare with the original Maggie photo (Space)">
         <svg class="ico-sm" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
@@ -167,19 +208,47 @@
     </div>
   </div>
 
-  <!-- All Photos Gallery Modal -->
+  <!-- Full-Image Maggie Gallery Modal with Best & Clearest Showcase -->
   <div class="modal-backdrop" id="gallery-modal" role="dialog" aria-modal="true" aria-labelledby="gal-heading" hidden>
     <div class="gallery-shell">
       <div class="gallery-head">
-        <div>
+        <div class="gallery-head-copy">
           <h2 class="gallery-title" id="gal-heading">Maggie's Photo Archive</h2>
-          <p class="gallery-sub" id="gal-sub">Pick any photo of Maggie to inspect or assemble into a giant mosaic.</p>
+          <p class="gallery-sub" id="gal-sub">Full uncropped photos of Maggie — click any photo to inspect or assemble a mosaic from it.</p>
         </div>
-        <button type="button" class="lb-close static" id="gal-close" aria-label="Close gallery">×</button>
+        <div class="gallery-head-actions">
+          <div class="gallery-tabs" id="gallery-tabs" role="tablist" aria-label="Gallery sections">
+            <button type="button" class="gal-tab active" data-gal-tab="all" role="tab" aria-selected="true">Featured &amp; All</button>
+            <button type="button" class="gal-tab" data-gal-tab="best" role="tab" aria-selected="false">Best &amp; Clearest</button>
+          </div>
+          <button type="button" class="lb-close static" id="gal-close" aria-label="Close gallery">×</button>
+        </div>
       </div>
-      <div class="gallery-grid" id="gallery-grid"></div>
-      <div class="gallery-foot" id="gallery-foot" hidden>
-        <button type="button" class="btn btn-subtle" id="btn-gallery-more">Load More Photos</button>
+
+      <div class="gallery-body" id="gallery-body">
+        <section class="gal-section" id="gal-best-section">
+          <div class="gal-section-head">
+            <div>
+              <h3 class="gal-section-title">Best &amp; Clearest Shots</h3>
+              <p class="gal-section-sub" id="gal-best-sub">Sharpest focus, cleanest lighting, and clearest framing of Maggie.</p>
+            </div>
+            <button type="button" class="text-link gal-see-all" id="btn-gal-see-best">View all clearest →</button>
+          </div>
+          <div class="gallery-masonry" id="gallery-best-grid"></div>
+        </section>
+
+        <section class="gal-section" id="gal-all-section">
+          <div class="gal-section-head">
+            <div>
+              <h3 class="gal-section-title">All Maggie Photos</h3>
+              <p class="gal-section-sub" id="gal-all-sub">Complete archive in full natural framing.</p>
+            </div>
+          </div>
+          <div class="gallery-masonry" id="gallery-grid"></div>
+          <div class="gallery-foot" id="gallery-foot" hidden>
+            <button type="button" class="btn btn-subtle" id="btn-gallery-more">Load More Photos</button>
+          </div>
+        </section>
       </div>
     </div>
   </div>
@@ -236,7 +305,7 @@
           <div class="tuning-grid">
             <label class="tuning-field" for="studio-cols">
               <div class="tuning-head"><span>Grid Size (long edge)</span><strong id="studio-cols-val">48 tiles</strong></div>
-              <input type="range" id="studio-cols" min="24" max="72" step="2" value="48">
+              <input type="range" id="studio-cols" min="16" max="112" step="4" value="48">
             </label>
             <label class="tuning-field" for="studio-gap">
               <div class="tuning-head"><span>Anti-Repeat Spacing</span><strong id="studio-gap-val">3 cells</strong></div>
@@ -257,9 +326,9 @@
     </aside>
   </div>
 
-  <script src="js/mosaic-engine.js?v=3"></script>
-  <script src="js/viewer.js?v=3"></script>
-  <script src="js/studio.js?v=3"></script>
-  <script src="js/main.js?v=3"></script>
+  <script src="js/mosaic-engine.js?v=4"></script>
+  <script src="js/viewer.js?v=4"></script>
+  <script src="js/studio.js?v=4"></script>
+  <script src="js/main.js?v=4"></script>
 </body>
 </html>

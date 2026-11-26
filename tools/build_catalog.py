@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-DDOM — Daily Dose of Maggie: Dual-Mode Multi-Atlas Catalog Compiler (v3)
-========================================================================
-Builds two complementary Maggie mosaic pools inside data/:
+DDOM — Daily Dose of Maggie: Combined Dual-Album Dual-Mode Catalog Compiler (v4)
+================================================================================
+Combines Album 1 + Album 2 verified Maggie archives, removes exact & burst/near duplicates
+(always keeping the sharper shot), ranks the Top 60 "Best & Clearest" Maggie portraits by
+optical sharpness/clarity/framing, and compiles two mosaic pools:
   1. Pure Maggie  (pureTiles):      All verified solo untouched Maggie photos (center-square crops).
-  2. Perfected    (perfectedTiles): Pure tiles + safely rescued face-free Maggie photos +
-                                    color-perfected sub-crops that crop at most 50% of any photo
-                                    (kept_area >= 50%) while always keeping Maggie clearly framed!
+  2. Perfected    (perfectedTiles): Pure tiles + verified strict-<=50% face-free & person-free
+                                    rescued Maggie photos + color-perfected <=50% Maggie sub-crops.
 
-Atlases are shared cleanly with zero duplication:
-  - data/atlas_0.jpg          : All Pure Maggie tiles (loaded immediately on page boot)
-  - data/atlas_1.jpg, _2.jpg  : Extra Perfected tiles (rescued + <=50% Maggie sub-crops)
-  - data/rescued/r_XXXX.jpg   : Pre-cropped face-free rescued Maggie photos (original URLs NEVER stored!)
-  - data/previews.jpg         : Compact 72x72 aspect-preserving miniatures for target sampling
-  - data/photos.json          : Version 3 compact metadata + 2x2 sub-quadrant RGB signatures + exact crop rects
+Atlases are tiered cleanly with zero duplication:
+  - data/atlas_0..N.jpg (tier="pure")      : Pure Maggie tiles (loaded immediately on boot)
+  - data/atlas_M..K.jpg (tier="perfected") : Extra Perfected tiles (warmed quietly in background)
+  - data/rescued/r_*.jpg                   : Pre-cropped face-free rescued JPEGs (original URLs NEVER stored!)
+  - data/previews.jpg                      : Aspect-preserving target-sampling atlas
+  - data/photos.json                       : Version 4 metadata + bestIds + 2x2 RGB signatures + exact cr rects
 """
 import argparse
 import json
@@ -32,6 +33,26 @@ RESCUED_DIR = os.path.join(DATA_DIR, "rescued")
 def center_square_rect(w: int, h: int) -> tuple[int, int, int]:
     side = min(w, h)
     return (w - side) // 2, (h - side) // 2, side
+
+
+def dhash_and_vec(im: Image.Image) -> tuple[int, list[int]]:
+    g = im.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+    px = list(g.tobytes())
+    bits = 0
+    for y in range(8):
+        row = y * 9
+        for x in range(8):
+            bits = (bits << 1) | (1 if px[row + x] > px[row + x + 1] else 0)
+    vec = list(im.resize((4, 4), Image.Resampling.BOX).tobytes())
+    return bits, vec
+
+
+def hamming(a: int, b: int) -> int:
+    return (a ^ b).bit_count()
+
+
+def vec_mae(a: list[int], b: list[int]) -> float:
+    return sum(abs(x - y) for x, y in zip(a, b)) / float(len(a))
 
 
 def quad_sig_12(im: Image.Image) -> list[int]:
@@ -83,7 +104,6 @@ def maggie_in_crop(box: list[float], x: int, y: int, s: int) -> tuple[bool, floa
     ia = (ix2 - ix1) * (iy2 - iy1)
     cov = ia / ba
 
-    # Keep Maggie's head (upper 25%) AND center (50%) safely inside the tile frame!
     mcx = 0.5 * (bx1 + bx2)
     mcy_head = by1 + 0.25 * bh
     mcy_mid = by1 + 0.52 * bh
@@ -100,13 +120,12 @@ def maggie_in_crop(box: list[float], x: int, y: int, s: int) -> tuple[bool, floa
     return ok, cov
 
 
-def generate_extra_crops(im: Image.Image, box, base_sig: list[int], max_extra: int = 3):
+def generate_extra_crops(im: Image.Image, box, base_sig: list[int], max_extra: int = 2):
     """
-    Generate up to `max_extra` color-diverse square sub-crops of `im` that:
-      - Strictly keep >= 50% of the original photo's area (<= 50% cropped!)
-      - Strictly keep Maggie clearly framed inside the crop
-      - Maximize 2x2 sub-quadrant color & gamut diversity vs the center crop and siblings.
-    Returns list of tuples: ((x, y, side), sig)
+    Generate up to `max_extra` color-diverse square sub-crops of `im` strictly keeping:
+      - >= 50% of the original photo's area (<= 50% cropped)
+      - Maggie clearly framed inside the crop
+      - High 2x2 sub-quadrant color & gamut diversity vs the center square and siblings.
     """
     w, h = im.size
     orig_area = float(w * h)
@@ -116,8 +135,6 @@ def generate_extra_crops(im: Image.Image, box, base_sig: list[int], max_extra: i
     cands = []
 
     if box is None:
-        # No YOLO box (usually extreme close-ups of Maggie): conservative >= 55% kept area
-        # and >= 88% of central 44% core kept inside!
         s_lo = max(int(math.ceil(math.sqrt(0.55 * orig_area))), int(round(min_side * 0.80)))
         if s_lo <= min_side:
             core = (w * 0.28, h * 0.28, w * 0.72, h * 0.72)
@@ -169,15 +186,15 @@ def generate_extra_crops(im: Image.Image, box, base_sig: list[int], max_extra: i
         best_score = 0.0
         for rect, sig in cands:
             min_d = min(sig_dist(sig, cs) for cs in chosen_sigs)
-            if min_d < 19.0:
+            if min_d < 21.0:
                 continue
             r, g, b = avg_rgb(sig)
             lum = 0.299 * r + 0.587 * g + 0.114 * b
             sat = max(r, g, b) - min(r, g, b)
             gamut_bonus = (
-                max(0.0, 95.0 - lum) * 0.20
-                + max(0.0, lum - 172.0) * 0.16
-                + max(0.0, sat - 34.0) * 0.22
+                max(0.0, 95.0 - lum) * 0.22
+                + max(0.0, lum - 172.0) * 0.18
+                + max(0.0, sat - 34.0) * 0.24
             )
             sc = min_d + gamut_bonus
             if sc > best_score:
@@ -190,15 +207,84 @@ def generate_extra_crops(im: Image.Image, box, base_sig: list[int], max_extra: i
     return picked
 
 
-def download_rescued_hd(orig_idx: int, url: str, cache_dir: str) -> str:
+def compute_clarity_score(meta: dict, im: Image.Image, cm: dict | None, box) -> float:
+    """
+    Rank photos for the "Best & Clearest" gallery showcase:
+      - High optical sharpness (Tenengrad gradient energy + Laplacian variance)
+      - High native resolution (>= 1000px short edge, non-video still)
+      - Clean balanced exposure & contrast (not murky/dark, not washed-out)
+      - Clear, well-proportioned Maggie framing (YOLOv4 dog detection in sweet spot)
+    """
+    ow = meta.get("w") or im.size[0]
+    oh = meta.get("h") or im.size[1]
+    min_dim = min(ow, oh)
+    asp = ow / max(1.0, float(oh))
+
+    score = 0.0
+    # 1. Optical sharpness & lighting clarity from OpenCV metrics
+    if cm:
+        tenen = min(14000.0, float(cm.get("tenen", 0.0)))
+        lap = min(1400.0, float(cm.get("lap", 0.0)))
+        lum = float(cm.get("lum", 120.0))
+        std = float(cm.get("std", 45.0))
+        score += math.sqrt(max(0.0, tenen)) * 0.95 + math.sqrt(max(0.0, lap)) * 1.15
+        # Reward well-lit balanced exposure (95..185) and crisp tonal contrast (38..78)
+        if 90 <= lum <= 188:
+            score += 24.0
+        elif lum < 68 or lum > 212:
+            score -= 35.0
+        if 36 <= std <= 82:
+            score += 18.0
+        elif std < 24:
+            score -= 30.0
+    else:
+        score += 30.0
+
+    # 2. Resolution & still-photo preference (avoid low-res video stills / extreme strips)
+    if min_dim >= 1400:
+        score += 26.0
+    elif min_dim >= 900:
+        score += 16.0
+    elif min_dim < 550:
+        score -= 35.0
+    if meta.get("vid"):
+        score -= 22.0
+    if asp < 0.58 or asp > 1.78:
+        score -= 25.0
+
+    # 3. Clear Maggie subject framing from YOLOv4
+    if box is not None:
+        iw, ih = im.size
+        bw = max(1.0, box[2] - box[0])
+        bh = max(1.0, box[3] - box[1])
+        area_frac = (bw * bh) / float(max(1, iw * ih))
+        conf = float(box[4]) if len(box) > 4 else 0.4
+        cid = int(box[5]) if len(box) > 5 else 16
+        if cid == 16:  # true dog class
+            score += conf * 48.0
+        else:
+            score += conf * 22.0
+        # Sweet-spot portrait framing: Maggie occupies 14%..78% of the photo & centered nicely
+        if 0.14 <= area_frac <= 0.78:
+            score += 24.0
+        elif area_frac < 0.06:
+            score -= 18.0
+        cx_rel = abs(0.5 * (box[0] + box[2]) / max(1, iw) - 0.5)
+        cy_rel = abs(0.5 * (box[1] + box[3]) / max(1, ih) - 0.5)
+        if cx_rel < 0.22 and cy_rel < 0.22:
+            score += 14.0
+    else:
+        score -= 15.0
+
+    return round(score, 2)
+
+
+def download_rescued_hd(tag: str, url: str, cache_dir: str) -> str:
     os.makedirs(cache_dir, exist_ok=True)
-    out = os.path.join(cache_dir, f"{orig_idx:04d}.jpg")
+    out = os.path.join(cache_dir, f"{tag}.jpg")
     if os.path.isfile(out) and os.path.getsize(out) > 2000:
         return out
-    req = urllib.request.Request(
-        f"{url}=w900-no",
-        headers={"User-Agent": "Mozilla/5.0"},
-    )
+    req = urllib.request.Request(f"{url}=w900-no", headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = resp.read()
     with open(out, "wb") as f:
@@ -206,18 +292,28 @@ def download_rescued_hd(orig_idx: int, url: str, cache_dir: str) -> str:
     return out
 
 
+def parse_id_set(s: str) -> set[int]:
+    return {int(x) for x in s.split(",") if x.strip().isdigit()}
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--index", default="/tmp/maggie_album_index.json")
-    ap.add_argument("--filter", default="/tmp/maggie_filter_v3.json")
-    ap.add_argument("--scan", default="/tmp/maggie_perfected_scan.json")
-    ap.add_argument("--previews-dir", required=True)
+    ap.add_argument("--index1", default="/tmp/maggie_album_index.json")
+    ap.add_argument("--filter1", default="/tmp/maggie_filter_v3.json")
+    ap.add_argument("--scan1", default="/tmp/maggie_perfected_scan.json")
+    ap.add_argument("--previews1", required=True)
+    ap.add_argument("--index2", default="/tmp/maggie_album2_index.json")
+    ap.add_argument("--scan2", default="/tmp/maggie_album2_scan.json")
+    ap.add_argument("--previews2", required=True)
     ap.add_argument("--rescued-cache-dir", required=True)
-    ap.add_argument("--exclude-ids", default="471,572,727,269,880,1265,1360,1397")
-    ap.add_argument("--exclude-rescued", default="103,166,174,252,811,868,913,1428")
-    ap.add_argument("--tile-px", type=int, default=96)
-    ap.add_argument("--slot-px", type=int, default=72)
-    ap.add_argument("--sample-sheet", default="")
+    ap.add_argument("--exclude-a1", default="243,269,471,572,727,880,1207,1265,1360,1397,1454")
+    ap.add_argument("--exclude-a1-rescued", default="103,166,174,252,811,868,913,1428")
+    ap.add_argument("--exclude-a2", default="371,372,381,425,457,472,493,526,579,585,631,740,741,804,869,1106,1307,1308,1331,1598,1674,1675,1796,1797,1896,1897,1901,1943,2037")
+    ap.add_argument("--exclude-a2-rescued", default="776,1751")
+    ap.add_argument("--tile-px", type=int, default=80)
+    ap.add_argument("--slot-px", type=int, default=64)
+    ap.add_argument("--max-extra-crops", type=int, default=2)
+    ap.add_argument("--best-sheet", default="")
     args = ap.parse_args()
 
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -225,26 +321,30 @@ def main():
         shutil.rmtree(RESCUED_DIR)
     os.makedirs(RESCUED_DIR, exist_ok=True)
 
-    # Remove stale atlas/catalog files
     for fn in os.listdir(DATA_DIR):
         p = os.path.join(DATA_DIR, fn)
         if os.path.isfile(p) and (fn.startswith("atlas") or fn in ("mosaic.json", "master-thumb.jpg", "previews.jpg", "photos.json")):
             os.remove(p)
 
-    album = json.load(open(args.index, "r", encoding="utf-8"))
-    filt = json.load(open(args.filter, "r", encoding="utf-8"))
-    scan = json.load(open(args.scan, "r", encoding="utf-8"))
-    boxes = {int(k): v for k, v in scan.get("maggie_boxes", {}).items()}
+    alb1 = json.load(open(args.index1, "r", encoding="utf-8"))
+    filt1 = json.load(open(args.filter1, "r", encoding="utf-8"))
+    scan1 = json.load(open(args.scan1, "r", encoding="utf-8"))
+    boxes1 = {int(k): v for k, v in scan1.get("maggie_boxes", {}).items()}
 
-    excl_pure = {int(x) for x in args.exclude_ids.split(",") if x.strip().isdigit()}
-    excl_resc = {int(x) for x in args.exclude_rescued.split(",") if x.strip().isdigit()}
+    alb2 = json.load(open(args.index2, "r", encoding="utf-8"))
+    scan2 = json.load(open(args.scan2, "r", encoding="utf-8"))
+    a1_clarity = {int(k): v for k, v in scan2.get("a1_clarity", {}).items()}
+    a2_meta = {int(k): v for k, v in scan2.get("a2_meta", {}).items()}
 
-    pure_ids = sorted(i for i in filt["strict_kept"] if i not in excl_pure)
+    excl_a1 = parse_id_set(args.exclude_a1)
+    excl_a1_resc = parse_id_set(args.exclude_a1_rescued)
+    excl_a2 = parse_id_set(args.exclude_a2)
+    excl_a2_resc = parse_id_set(args.exclude_a2_rescued)
 
-    # 1. Load valid Pure Maggie images
-    pure_valid = []
-    for idx in pure_ids:
-        p = os.path.join(args.previews_dir, f"{idx:04d}.jpg")
+    # 1. Gather all clean solo candidates from Album 1 + Album 2
+    raw_candidates = []
+    for idx in sorted(i for i in filt1["strict_kept"] if i not in excl_a1):
+        p = os.path.join(args.previews1, f"{idx:04d}.jpg")
         if not os.path.isfile(p):
             continue
         try:
@@ -257,23 +357,93 @@ def main():
         var_v = sum((v - mean_v) ** 2 for v in vals) / len(vals)
         if var_v < 18.0:
             continue
-        pure_valid.append((idx, album[idx], im))
+        cm = a1_clarity.get(idx)
+        box = boxes1.get(idx)
+        clarity = compute_clarity_score(alb1[idx], im, cm, box)
+        dh, vec = dhash_and_vec(im)
+        raw_candidates.append({
+            "src_alb": 1,
+            "orig": idx,
+            "meta": alb1[idx],
+            "im": im,
+            "box": box,
+            "cm": cm,
+            "clarity": clarity,
+            "dh": dh,
+            "vec": vec,
+            "ts": alb1[idx].get("ts") or 0,
+        })
 
-    # 2. Prepare verified strict <=50% rescued Maggie photos (downloaded at w900-no & pre-cropped locally!)
+    for idx in sorted(i for i in scan2.get("a2_kept", []) if i not in excl_a2):
+        p = os.path.join(args.previews2, f"{idx:04d}.jpg")
+        if not os.path.isfile(p):
+            continue
+        try:
+            im = Image.open(p).convert("RGB")
+        except Exception:
+            continue
+        tiny = im.resize((8, 8), Image.Resampling.BOX).tobytes()
+        vals = [0.299 * tiny[k] + 0.587 * tiny[k + 1] + 0.114 * tiny[k + 2] for k in range(0, len(tiny), 3)]
+        mean_v = sum(vals) / len(vals)
+        var_v = sum((v - mean_v) ** 2 for v in vals) / len(vals)
+        if var_v < 18.0:
+            continue
+        m2 = a2_meta.get(idx, {})
+        cm = m2.get("cm")
+        box = m2.get("dog")
+        clarity = compute_clarity_score(alb2[idx], im, cm, box)
+        dh, vec = dhash_and_vec(im)
+        raw_candidates.append({
+            "src_alb": 2,
+            "orig": idx,
+            "meta": alb2[idx],
+            "im": im,
+            "box": box,
+            "cm": cm,
+            "clarity": clarity,
+            "dh": dh,
+            "vec": vec,
+            "ts": alb2[idx].get("ts") or 0,
+        })
+
+    # 2. Global exact + burst/near-duplicate deduplication (always keeping the SHARPER photo!)
+    # Process highest-clarity photos first so whenever two burst photos collide, the clearest shot wins!
+    ordered_by_clarity = sorted(raw_candidates, key=lambda c: c["clarity"], reverse=True)
+    dedup_pure = []
+    dups_removed = 0
+    for cand in ordered_by_clarity:
+        is_dup = False
+        c_dh, c_vec, c_ts = cand["dh"], cand["vec"], cand["ts"]
+        for kept in dedup_pure:
+            hd = hamming(c_dh, kept["dh"])
+            if hd <= 7 and vec_mae(c_vec, kept["vec"]) < 12.5:
+                is_dup = True
+                break
+            if c_ts and kept["ts"] and abs(c_ts - kept["ts"]) <= 6000 and hd <= 13 and vec_mae(c_vec, kept["vec"]) < 18.0:
+                is_dup = True
+                break
+        if is_dup:
+            dups_removed += 1
+            continue
+        dedup_pure.append(cand)
+
+    # Sort back into a neat chronological / album order for consistent archive browsing
+    dedup_pure.sort(key=lambda c: (c["ts"] or 0, c["src_alb"], c["orig"]), reverse=True)
+    print(f"Combined pure candidates: {len(raw_candidates)} -> after burst/near-dup dedup: {len(dedup_pure)} (removed {dups_removed} duplicates)")
+
+    # 3. Verified strict-50% rescued Maggie photos from Album 1 + Album 2
     rescued_valid = []
-    for r in scan.get("rescued", []):
+    for r in scan1.get("rescued", []):
         idx = int(r["idx"])
-        if idx in excl_resc or idx in excl_pure:
+        if idx in excl_a1_resc or idx in excl_a1:
             continue
         x1, y1, x2, y2 = r["crop"]
         ow, oh = float(r["w"]), float(r["h"])
-        rw, rh = x2 - x1, y2 - y1
-        max_sq = min(rw, rh)
-        # STRICT 50% RULE: even the final square tile MUST keep >= 50% of the original photo's area!
+        max_sq = min(x2 - x1, y2 - y1)
         if (max_sq * max_sq) < 0.50 * (ow * oh):
             continue
-        meta = album[idx]
-        hd_path = download_rescued_hd(idx, meta["url"], args.rescued_cache_dir)
+        meta = alb1[idx]
+        hd_path = download_rescued_hd(f"a1_{idx:04d}", meta["url"], args.rescued_cache_dir)
         hd_im = Image.open(hd_path).convert("RGB")
         hw, hh = hd_im.size
         cx1 = max(0, min(hw - 1, int(round((x1 / ow) * hw))))
@@ -281,27 +451,62 @@ def main():
         cx2 = max(cx1 + 2, min(hw, int(round((x2 / ow) * hw))))
         cy2 = max(cy1 + 2, min(hh, int(round((y2 / oh) * hh))))
         cropped_hd = hd_im.crop((cx1, cy1, cx2, cy2))
-        rel_src = f"data/rescued/r_{idx:04d}.jpg"
-        out_resc_path = os.path.join(ROOT, rel_src)
-        cropped_hd.save(out_resc_path, "JPEG", quality=88, optimize=True)
-        rescued_valid.append((idx, meta, cropped_hd, rel_src, r))
+        rel_src = f"data/rescued/r1_{idx:04d}.jpg"
+        cropped_hd.save(os.path.join(ROOT, rel_src), "JPEG", quality=86, optimize=True)
+        rescued_valid.append((1, idx, meta, cropped_hd, rel_src, r))
 
-    pure_count = len(pure_valid)
+    for r in scan2.get("a2_rescued", []):
+        idx = int(r["idx"])
+        if idx in excl_a2_resc or idx in excl_a2:
+            continue
+        x1, y1, x2, y2 = r["crop"]
+        ow, oh = float(r["w"]), float(r["h"])
+        max_sq = min(x2 - x1, y2 - y1)
+        if (max_sq * max_sq) < 0.50 * (ow * oh):
+            continue
+        meta = alb2[idx]
+        hd_path = download_rescued_hd(f"a2_{idx:04d}", meta["url"], args.rescued_cache_dir)
+        hd_im = Image.open(hd_path).convert("RGB")
+        hw, hh = hd_im.size
+        cx1 = max(0, min(hw - 1, int(round((x1 / ow) * hw))))
+        cy1 = max(0, min(hh - 1, int(round((y1 / oh) * hh))))
+        cx2 = max(cx1 + 2, min(hw, int(round((x2 / ow) * hw))))
+        cy2 = max(cy1 + 2, min(hh, int(round((y2 / oh) * hh))))
+        cropped_hd = hd_im.crop((cx1, cy1, cx2, cy2))
+        # Deduplicate rescued crop against pure set too
+        rdh, rvec = dhash_and_vec(cropped_hd)
+        if any(hamming(rdh, k["dh"]) <= 7 and vec_mae(rvec, k["vec"]) < 13.0 for k in dedup_pure):
+            continue
+        rel_src = f"data/rescued/r2_{idx:04d}.jpg"
+        cropped_hd.save(os.path.join(ROOT, rel_src), "JPEG", quality=86, optimize=True)
+        rescued_valid.append((2, idx, meta, cropped_hd, rel_src, r))
+
+    pure_count = len(dedup_pure)
     resc_count = len(rescued_valid)
     total_photos = pure_count + resc_count
-    print(f"Pure Maggie photos: {pure_count}")
-    print(f"Verified strict-50% rescued Maggie photos: {resc_count} (total: {total_photos})")
+    print(f"Pure Maggie photos: {pure_count} | Verified strict-50% rescued: {resc_count} | Total photos: {total_photos}")
 
+    # 4. Pack Pure Maggie atlases (tier="pure", 28x28 = 784 tiles per 2240x2240 atlas at 80px!)
     tile_px = args.tile_px
-    atlas_cols = 24
-    per_atlas = atlas_cols * atlas_cols  # 576 tiles per atlas
+    atlas_cols = 28 if tile_px <= 80 else 24
+    per_atlas = atlas_cols * atlas_cols
+    n_pure_atlases = math.ceil(pure_count / per_atlas)
 
-    # 3. Pack atlas_0.jpg with ALL Pure Maggie center-square tiles (pure_count <= 576)
-    assert pure_count <= per_atlas, f"Expected <= {per_atlas} pure tiles per first atlas, got {pure_count}"
-    a0_rows = math.ceil(pure_count / atlas_cols)
-    atlas_0 = Image.new("RGB", (atlas_cols * tile_px, a0_rows * tile_px), (28, 22, 18))
+    atlas_imgs = []
+    atlas_meta = []
+    for ai in range(n_pure_atlases):
+        cnt = min(per_atlas, pure_count - ai * per_atlas)
+        arows = math.ceil(cnt / atlas_cols)
+        atlas_imgs.append(Image.new("RGB", (atlas_cols * tile_px, arows * tile_px), (28, 22, 18)))
+        atlas_meta.append({
+            "src": f"data/atlas_{ai}.jpg",
+            "cols": atlas_cols,
+            "rows": arows,
+            "tilePx": tile_px,
+            "tier": "pure",
+        })
 
-    # Preview atlas for ALL photos (pure + rescued)
+    # Preview atlas for ALL photos
     slot_px = args.slot_px
     pv_cols = math.ceil(math.sqrt(total_photos))
     pv_rows = math.ceil(total_photos / pv_cols)
@@ -309,20 +514,23 @@ def main():
 
     photos_out = []
     pure_tiles_out = []
-    extra_perf_specs = []  # tuples of (photo_id, thumb_img, cr_norm_or_None, sig, debug_info)
+    extra_perf_specs = []
 
-    for k, (orig_idx, meta, im) in enumerate(pure_valid):
+    for k, cand in enumerate(dedup_pure):
+        im = cand["im"]
+        meta = cand["meta"]
         iw, ih = im.size
-        ax = k % atlas_cols
-        ay = k // atlas_cols
+        a_idx = k // per_atlas
+        local_i = k % per_atlas
+        ax = local_i % atlas_cols
+        ay = local_i // atlas_cols
 
         cx0, cy0, side = center_square_rect(iw, ih)
         sq = im.crop((cx0, cy0, cx0 + side, cy0 + side))
         thumb = sq.resize((tile_px, tile_px), Image.Resampling.LANCZOS)
-        atlas_0.paste(thumb, (ax * tile_px, ay * tile_px))
+        atlas_imgs[a_idx].paste(thumb, (ax * tile_px, ay * tile_px))
         sig = quad_sig_12(thumb)
 
-        # Preview miniature
         scale = min(slot_px / iw, slot_px / ih)
         pw = max(12, min(slot_px, int(round(iw * scale))))
         ph = max(12, min(slot_px, int(round(ih * scale))))
@@ -341,13 +549,15 @@ def main():
                 pass
 
         photos_out.append({
-            "orig": orig_idx,
+            "orig": cand["orig"],
+            "alb": cand["src_alb"],
             "d": d_str,
             "w": meta.get("w") or iw,
             "h": meta.get("h") or ih,
             "u": meta["url"],
             "pure": 1,
-            "a": 0,
+            "q": cand["clarity"],
+            "a": a_idx,
             "ax": ax,
             "ay": ay,
             "px": px_col,
@@ -359,30 +569,21 @@ def main():
         })
         pure_tiles_out.append({
             "p": k,
-            "a": 0,
+            "a": a_idx,
             "ax": ax,
             "ay": ay,
             "s": sig,
         })
 
-        # Generate up to 3 color-perfected <=50%-cropped Maggie sub-crops for Perfected mode!
-        extras = generate_extra_crops(im, boxes.get(orig_idx), sig, max_extra=3)
-        for (rx, ry, rs), esig in extras:
+        extras = generate_extra_crops(im, cand["box"], sig, max_extra=args.max_extra_crops)
+        for (rx, ry, rs), _ in extras:
             ethumb = im.crop((rx, ry, rx + rs, ry + rs)).resize((tile_px, tile_px), Image.Resampling.LANCZOS)
-            cr = [
-                round(rx / iw, 4),
-                round(ry / ih, 4),
-                round(rs / iw, 4),
-                round(rs / ih, 4),
-            ]
-            # Recompute signature directly from the resized tile so it matches atlas pixel-for-pixel
-            esig2 = quad_sig_12(ethumb)
-            kept_pct = int(round(100.0 * (rs * rs) / (iw * ih)))
-            extra_perf_specs.append((k, ethumb, cr, esig2, (orig_idx, kept_pct, boxes.get(orig_idx) is not None)))
+            cr = [round(rx / iw, 4), round(ry / ih, 4), round(rs / iw, 4), round(rs / ih, 4)]
+            extra_perf_specs.append((k, ethumb, cr, quad_sig_12(ethumb)))
 
-    # 4. Append rescued Maggie photos (indices pure_count .. total_photos-1) & their Perfected tiles
+    # 5. Append rescued photos & their Perfected tiles
     rescued_tile_indices = []
-    for r_i, (orig_idx, meta, rim, rel_src, rinfo) in enumerate(rescued_valid):
+    for r_i, (src_alb, orig_idx, meta, rim, rel_src, rinfo) in enumerate(rescued_valid):
         pid = pure_count + r_i
         rw, rh = rim.size
         cx0, cy0, side = center_square_rect(rw, rh)
@@ -390,7 +591,6 @@ def main():
         thumb = sq.resize((tile_px, tile_px), Image.Resampling.LANCZOS)
         sig = quad_sig_12(thumb)
 
-        # Preview miniature
         scale = min(slot_px / rw, slot_px / rh)
         pw = max(12, min(slot_px, int(round(rw * scale))))
         ph = max(12, min(slot_px, int(round(rh * scale))))
@@ -408,15 +608,16 @@ def main():
             except Exception:
                 pass
 
-        # NOTE: NO "u" field stored for rescued photos — ONLY the verified face-free local JPEG `src`!
         photos_out.append({
             "orig": orig_idx,
+            "alb": src_alb,
             "d": d_str,
             "w": rw,
             "h": rh,
             "src": rel_src,
             "pure": 0,
-            "a": 1,  # updated below once packed
+            "q": 40.0,
+            "a": n_pure_atlases,
             "ax": 0,
             "ay": 0,
             "px": px_col,
@@ -427,50 +628,35 @@ def main():
             "ph": ph,
         })
         rescued_tile_indices.append((pid, len(extra_perf_specs)))
-        extra_perf_specs.append((pid, thumb, None, sig, (orig_idx, int(round(100 * rinfo["area"])), True)))
+        extra_perf_specs.append((pid, thumb, None, sig))
 
-    # 5. Pack extra Perfected tiles into atlas_1.jpg, atlas_2.jpg ...
+    # 6. Pack extra Perfected tiles into tier="perfected" atlases
     n_extra = len(extra_perf_specs)
     n_extra_atlases = math.ceil(n_extra / per_atlas) if n_extra > 0 else 0
-    atlas_imgs = [atlas_0]
-    atlas_meta = [{
-        "src": "data/atlas_0.jpg",
-        "cols": atlas_cols,
-        "rows": a0_rows,
-        "tilePx": tile_px,
-        "tier": "pure",
-    }]
-
     for ei in range(n_extra_atlases):
         cnt = min(per_atlas, n_extra - ei * per_atlas)
         arows = math.ceil(cnt / atlas_cols)
+        ai = n_pure_atlases + ei
         atlas_imgs.append(Image.new("RGB", (atlas_cols * tile_px, arows * tile_px), (28, 22, 18)))
         atlas_meta.append({
-            "src": f"data/atlas_{ei + 1}.jpg",
+            "src": f"data/atlas_{ai}.jpg",
             "cols": atlas_cols,
             "rows": arows,
             "tilePx": tile_px,
             "tier": "perfected",
         })
 
-    # Perfected pool = ALL pure tiles + ALL extra rescued & sub-crop tiles!
     perfected_tiles_out = [dict(t) for t in pure_tiles_out]
-
     resc_pos_lookup = {spec_idx: pid for pid, spec_idx in rescued_tile_indices}
-    for s_idx, (pid, thumb, cr, sig, _) in enumerate(extra_perf_specs):
-        a_idx = 1 + (s_idx // per_atlas)
+
+    for s_idx, (pid, thumb, cr, sig) in enumerate(extra_perf_specs):
+        a_idx = n_pure_atlases + (s_idx // per_atlas)
         local_i = s_idx % per_atlas
         ax = local_i % atlas_cols
         ay = local_i // atlas_cols
         atlas_imgs[a_idx].paste(thumb, (ax * tile_px, ay * tile_px))
 
-        tile_obj = {
-            "p": pid,
-            "a": a_idx,
-            "ax": ax,
-            "ay": ay,
-            "s": sig,
-        }
+        tile_obj = {"p": pid, "a": a_idx, "ax": ax, "ay": ay, "s": sig}
         if cr is not None:
             tile_obj["cr"] = cr
         perfected_tiles_out.append(tile_obj)
@@ -480,80 +666,64 @@ def main():
             photos_out[pid]["ax"] = ax
             photos_out[pid]["ay"] = ay
 
-    # Optional visual sample contact sheet of newly generated Perfected sub-crops
-    if args.sample_sheet:
-        yolo_subs = [(thumb, dbg) for (_, thumb, cr, _, dbg) in extra_perf_specs if cr is not None and dbg[2]]
-        cols_s, rows_s, sz = 10, 4, 120
-        sheet = Image.new("RGB", (cols_s * sz, rows_s * sz), (24, 20, 16))
-        step = max(1, len(yolo_subs) // (cols_s * rows_s))
-        picks = yolo_subs[::step][:cols_s * rows_s]
-        for k, (th, (oid, kpct, _)) in enumerate(picks):
-            sq_s = th.resize((sz, sz), Image.Resampling.LANCZOS)
-            dr = ImageDraw.Draw(sq_s)
-            dr.rectangle([0, 0, 74, 15], fill=(20, 16, 12))
-            dr.text((3, 2), f"#{oid} {kpct}%", fill=(246, 241, 233))
-            sheet.paste(sq_s, ((k % cols_s) * sz, (k // cols_s) * sz))
-        sheet.save(args.sample_sheet, "JPEG", quality=88)
-        print(f"  Saved sample sheet: {args.sample_sheet}")
+    # 7. Select Top 60 "Best & Clearest" shots (time-spaced so they show 60 diverse crystal-clear Maggie moments!)
+    ranked_pure = sorted(range(pure_count), key=lambda k: dedup_pure[k]["clarity"], reverse=True)
+    best_ids = []
+    best_times = []
+    for k in ranked_pure:
+        ts = dedup_pure[k]["ts"]
+        if ts and any(abs(ts - bt) < 20 * 60 * 1000 for bt in best_times):
+            continue
+        best_ids.append(k)
+        if ts:
+            best_times.append(ts)
+        if len(best_ids) >= 60:
+            break
 
-    # 6. Save all atlases + previews
+    # Featured pool for Daily Dose: top ~200 clear well-balanced portraits
+    featured_ids = ranked_pure[:min(200, len(ranked_pure))]
+
+    if args.best_sheet and best_ids:
+        cols_s, rows_s, sz = 10, 6, 128
+        sheet = Image.new("RGB", (cols_s * sz, rows_s * sz), (24, 20, 16))
+        for i, k in enumerate(best_ids[:cols_s * rows_s]):
+            im = dedup_pure[k]["im"]
+            w, h = im.size
+            s = min(w, h)
+            sq_s = im.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2)).resize((sz, sz), Image.Resampling.LANCZOS)
+            dr = ImageDraw.Draw(sq_s)
+            dr.rectangle([0, 0, 82, 16], fill=(20, 16, 12))
+            dr.text((3, 2), f"#{i+1} A{dedup_pure[k]['src_alb']}#{dedup_pure[k]['orig']}", fill=(246, 241, 233))
+            sheet.paste(sq_s, ((i % cols_s) * sz, (i // cols_s) * sz))
+        sheet.save(args.best_sheet, "JPEG", quality=88)
+        print(f"  Saved Best & Clearest sheet: {args.best_sheet}")
+
+    # 8. Write all atlases, previews & photos.json (v4)
     total_kb = 0.0
     for ai, aim in enumerate(atlas_imgs):
         out_p = os.path.join(DATA_DIR, f"atlas_{ai}.jpg")
-        aim.save(out_p, "JPEG", quality=84 if ai == 0 else 82, optimize=True)
+        aim.save(out_p, "JPEG", quality=83 if atlas_meta[ai]["tier"] == "pure" else 80, optimize=True)
         kb = os.path.getsize(out_p) / 1024.0
         total_kb += kb
         print(f"  atlas_{ai}.jpg ({atlas_meta[ai]['tier']}): {aim.size} ({kb:.1f} KB)")
 
     pv_path = os.path.join(DATA_DIR, "previews.jpg")
-    pv_atlas.save(pv_path, "JPEG", quality=82, optimize=True)
+    pv_atlas.save(pv_path, "JPEG", quality=80, optimize=True)
     pv_kb = os.path.getsize(pv_path) / 1024.0
     total_kb += pv_kb
     print(f"  previews.jpg: {pv_atlas.size} ({pv_kb:.1f} KB)")
 
-    resc_kb = sum(os.path.getsize(os.path.join(RESCUED_DIR, fn)) for fn in os.listdir(RESCUED_DIR)) / 1024.0
+    resc_kb = sum(os.path.getsize(os.path.join(RESCUED_DIR, fn)) for fn in os.listdir(RESCUED_DIR)) / 1024.0 if os.listdir(RESCUED_DIR) else 0.0
     total_kb += resc_kb
     print(f"  rescued/ ({resc_count} JPEGs): {resc_kb:.1f} KB")
 
-    # 7. Pick ~180 strong Pure Maggie close-ups for featuredIds (Today's Dose works in BOTH modes!)
-    scored = []
-    for k, (_, _, im) in enumerate(pure_valid):
-        w, h = im.size
-        asp = w / max(1, h)
-        if asp < 0.65 or asp > 1.55:
-            continue
-        g8 = im.resize((8, 8), Image.Resampling.BOX).tobytes()
-        center_lums, edge_lums = [], []
-        center_warm = 0
-        for yy in range(8):
-            for xx in range(8):
-                o = (yy * 8 + xx) * 3
-                r, g, b = g8[o], g8[o + 1], g8[o + 2]
-                lum = 0.299 * r + 0.587 * g + 0.114 * b
-                if 2 <= xx <= 5 and 2 <= yy <= 5:
-                    center_lums.append(lum)
-                    if r >= b - 8 and lum > 115:
-                        center_warm += 1
-                else:
-                    edge_lums.append(lum)
-        all_lums = center_lums + edge_lums
-        mean_l = sum(all_lums) / len(all_lums)
-        std_l = math.sqrt(sum((v - mean_l) ** 2 for v in all_lums) / len(all_lums))
-        c_mean = sum(center_lums) / len(center_lums)
-        e_mean = sum(edge_lums) / len(edge_lums)
-        score = std_l * 1.1 + max(0.0, c_mean - e_mean) * 0.8 + center_warm * 3.5
-        if mean_l < 55 or mean_l > 215:
-            score -= 50
-        scored.append((score, k))
-    scored.sort(reverse=True)
-    featured_ids = [k for _, k in scored[:min(180, len(scored))]]
-
     payload = {
-        "version": 3,
+        "version": 4,
         "builtAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "count": total_photos,
         "pureCount": pure_count,
         "rescuedCount": resc_count,
+        "bestIds": best_ids,
         "featuredIds": featured_ids,
         "atlases": atlas_meta,
         "previewAtlas": {
@@ -572,7 +742,7 @@ def main():
     j_kb = os.path.getsize(json_path) / 1024.0
     total_kb += j_kb
     print(f"  photos.json: {j_kb:.1f} KB")
-    print(f"Pure tiles: {len(pure_tiles_out)} | Perfected tiles: {len(perfected_tiles_out)}")
+    print(f"Pure tiles: {len(pure_tiles_out)} | Perfected tiles: {len(perfected_tiles_out)} | Best & Clearest: {len(best_ids)}")
     print(f"TOTAL data/ pack size: {total_kb / 1024.0:.2f} MB")
 
 

@@ -1,13 +1,17 @@
-/* DDOM — Daily Dose of Maggie: Dual-Mode Perceptual Photomosaic Engine
-   Supports two modes seamlessly:
-   - "pure":      Full untouched solo Maggie photos (center-square crops, zero extra cropping).
-   - "perfected": Expanded Maggie tile pool including safely face-free rescued Maggie photos
-                  + color-perfected sub-crops (cropping at most 50% of any photo, always keeping
-                  Maggie inside the frame) for dramatically higher natural color accuracy!
-   In BOTH modes:
-   - Strictly excludes ALL tiles belonging to the target photo (photo-level exclusion).
-   - Enforces photo-level spatial anti-repetition so two crops of the same photo never touch.
-   - Matches using 2x2 sub-quadrant Redmean perceptual RGB distance (~35–65ms). */
+/* DDOM — Daily Dose of Maggie: Dual-Mode Perceptual Photomosaic Engine (v4)
+   Supports:
+   - Two modes:
+     * "pure":      Full untouched solo Maggie photos (center-square crops, zero extra cropping).
+     * "perfected": Expanded Maggie tile pool including safely face-free rescued Maggie photos
+                    + color-perfected sub-crops (cropping at most 50% of any photo, always keeping
+                    Maggie inside the frame) for dramatically higher natural color accuracy.
+   - Settings:
+     * noReuse:     Strict 1-to-1 unique photo assignment (every photo used at most once!).
+                    Auto-fits grid dimensions if larger than available unique photos and uses
+                    salience-first cell ordering so shadows, highlights & focal details get first pick.
+     * allowRotate: Evaluates all 4 quadrant rotations (0°, 90°, 180°, 270°) for every tile
+                    (4× directional edge palette with zero extra atlas size!).
+   - Extended grid densities up to 96–112 tiles on the long edge. */
 window.DDOM = window.DDOM || {};
 
 (function () {
@@ -40,12 +44,22 @@ window.DDOM = window.DDOM || {};
     return (2.0 + rmean / 256.0) * dr * dr + 4.0 * dg * dg + (2.0 + (255.0 - rmean) / 256.0) * db * db;
   }
 
-  function sigDistance(a, b) {
+  /* Quadrant permutations for clockwise rotations (0°, 90° CW, 180°, 270° CW):
+     Original quadrants: 0=TL, 3=TR, 6=BL, 9=BR
+     90°  CW: new [TL,TR,BL,BR] = old [BL,TL,BR,TR] => offsets [6,0,9,3]
+     180° CW: new [TL,TR,BL,BR] = old [BR,BL,TR,TL] => offsets [9,6,3,0]
+     270° CW: new [TL,TR,BL,BR] = old [TR,BR,TL,BL] => offsets [3,9,0,6] */
+  function sigDistanceRot(a, b, rot) {
+    var o0, o1, o2, o3;
+    if (rot === 0)      { o0 = 0; o1 = 3; o2 = 6; o3 = 9; }
+    else if (rot === 1) { o0 = 6; o1 = 0; o2 = 9; o3 = 3; }
+    else if (rot === 2) { o0 = 9; o1 = 6; o2 = 3; o3 = 0; }
+    else                { o0 = 3; o1 = 9; o2 = 0; o3 = 6; }
     return (
-      redmeanDistSq(a[0], a[1], a[2], b[0], b[1], b[2]) +
-      redmeanDistSq(a[3], a[4], a[5], b[3], b[4], b[5]) +
-      redmeanDistSq(a[6], a[7], a[8], b[6], b[7], b[8]) +
-      redmeanDistSq(a[9], a[10], a[11], b[9], b[10], b[11])
+      redmeanDistSq(a[0], a[1], a[2],   b[o0], b[o0 + 1], b[o0 + 2]) +
+      redmeanDistSq(a[3], a[4], a[5],   b[o1], b[o1 + 1], b[o1 + 2]) +
+      redmeanDistSq(a[6], a[7], a[8],   b[o2], b[o2 + 1], b[o2 + 2]) +
+      redmeanDistSq(a[9], a[10], a[11], b[o3], b[o3 + 1], b[o3 + 2])
     ) * 0.25;
   }
 
@@ -100,8 +114,8 @@ window.DDOM = window.DDOM || {};
   }
 
   /**
-   * Solves tile layout using photo-level exclusion & photo-level anti-repetition!
-   * `tiles` is an array of tile objects where each tile has `.p` (source photo ID) and `.sig` (Float32Array(12)).
+   * Solves tile layout with photo-level exclusion, anti-repetition, optional strict No-Reuse,
+   * and optional 0°/90°/180°/270° rotation matching!
    */
   function solveGrid(cellSigs, tiles, numPhotos, cols, rows, opts) {
     opts = opts || {};
@@ -110,6 +124,8 @@ window.DDOM = window.DDOM || {};
     var total = rows * cols;
     var minGap = typeof opts.minGap === 'number' ? opts.minGap : 3;
     var isPerfected = !!opts.perfected;
+    var noReuse = !!opts.noReuse;
+    var allowRotate = !!opts.allowRotate;
     var effGap = Math.max(1, Math.min(minGap, Math.floor(Math.sqrt(Math.max(1, numPhotos - 1)) * 0.72)));
 
     var tileAvg = new Float32Array(nTiles * 3);
@@ -122,8 +138,9 @@ window.DDOM = window.DDOM || {};
       tilePhoto[t] = tiles[t].p;
     }
 
-    var grid = new Int32Array(total);      /* stores tile index in `tiles` */
-    var gridPhoto = new Int32Array(total); /* stores source photo ID `tile.p` */
+    var grid = new Int32Array(total);      /* tile index in `tiles` */
+    var gridRot = new Uint8Array(total);   /* 0, 1 (90° CW), 2 (180°), 3 (270° CW) */
+    var gridPhoto = new Int32Array(total); /* source photo ID `tile.p` */
     grid.fill(-1);
     gridPhoto.fill(-1);
 
@@ -131,79 +148,188 @@ window.DDOM = window.DDOM || {};
     var nearPhotoDist = new Int16Array(numPhotos);
     var targetAvg = total / Math.max(1, numPhotos - (excludePhotoId >= 0 ? 1 : 0));
 
-    /* In Perfected mode, prioritize pure color fidelity even more strongly while still spacing repeats cleanly! */
-    var usePenalty = isPerfected ? 950 : (numPhotos > 400 ? 1550 : 280);
+    var usePenalty = isPerfected ? 900 : (numPhotos > 400 ? 1500 : 280);
     var repeatPenalty = isPerfected ? 52000 : (numPhotos > 400 ? 68000 : 38000);
 
-    for (var row = 0; row < rows; row++) {
-      var rev = (row & 1) === 1;
-      for (var step = 0; step < cols; step++) {
-        var col = rev ? (cols - 1 - step) : step;
-        var cellIdx = row * cols + col;
-        var csig = cellSigs[cellIdx];
-        var cr = (csig[0] + csig[3] + csig[6] + csig[9]) * 0.25;
-        var cg = (csig[1] + csig[4] + csig[7] + csig[10]) * 0.25;
-        var cb = (csig[2] + csig[5] + csig[8] + csig[11]) * 0.25;
+    /* Build traversal order:
+       - Normal mode: serpentine row scan (fast, smooth spatial anti-repetition).
+       - No-Reuse mode: salience-first ordering! Extreme shadows/highlights, sharp internal edges,
+         and central portrait focal regions get FIRST pick of unique photos so the portrait stays razor-sharp! */
+    var cellOrder = new Int32Array(total);
+    if (noReuse) {
+      var meanR = 0, meanG = 0, meanB = 0;
+      for (var ci = 0; ci < total; ci++) {
+        var cs = cellSigs[ci];
+        meanR += (cs[0] + cs[3] + cs[6] + cs[9]) * 0.25;
+        meanG += (cs[1] + cs[4] + cs[7] + cs[10]) * 0.25;
+        meanB += (cs[2] + cs[5] + cs[8] + cs[11]) * 0.25;
+      }
+      meanR /= total; meanG /= total; meanB /= total;
 
+      var priority = new Float32Array(total);
+      var midC = (cols - 1) * 0.5;
+      var midR = (rows - 1) * 0.5;
+      var invMaxD = 1 / Math.max(1, Math.hypot(midC, midR));
+      var idxArr = new Array(total);
+      for (var r0i = 0; r0i < rows; r0i++) {
+        for (var c0i = 0; c0i < cols; c0i++) {
+          var id = r0i * cols + c0i;
+          var sg = cellSigs[id];
+          var ar = (sg[0] + sg[3] + sg[6] + sg[9]) * 0.25;
+          var ag = (sg[1] + sg[4] + sg[7] + sg[10]) * 0.25;
+          var ab = (sg[2] + sg[5] + sg[8] + sg[11]) * 0.25;
+          /* Distance from portrait mean color (rare darks/brights/vivid hues score highest) */
+          var extremity = Math.hypot(ar - meanR, ag - meanG, ab - meanB);
+          /* Internal 2x2 edge contrast */
+          var edgeC = (
+            Math.abs(sg[0] - sg[9]) + Math.abs(sg[3] - sg[6]) +
+            Math.abs(sg[1] - sg[10]) + Math.abs(sg[4] - sg[7])
+          ) * 0.25;
+          /* Gentle center-focus bias so Maggie's eyes/face win tiebreaks over border */
+          var centerBias = (1.0 - Math.hypot(c0i - midC, r0i - midR) * invMaxD) * 26.0;
+          priority[id] = extremity * 1.15 + edgeC * 0.65 + centerBias;
+          idxArr[id] = id;
+        }
+      }
+      idxArr.sort(function (a, b) { return priority[b] - priority[a]; });
+      for (var k = 0; k < total; k++) cellOrder[k] = idxArr[k];
+    } else {
+      var pos = 0;
+      for (var row = 0; row < rows; row++) {
+        var rev = (row & 1) === 1;
+        for (var step = 0; step < cols; step++) {
+          var col = rev ? (cols - 1 - step) : step;
+          cellOrder[pos++] = row * cols + col;
+        }
+      }
+    }
+
+    var rotCount = allowRotate ? 4 : 1;
+
+    for (var oi = 0; oi < total; oi++) {
+      var cellIdx = cellOrder[oi];
+      var cRow = Math.floor(cellIdx / cols);
+      var cCol = cellIdx - cRow * cols;
+      var csig = cellSigs[cellIdx];
+      var cr = (csig[0] + csig[3] + csig[6] + csig[9]) * 0.25;
+      var cg = (csig[1] + csig[4] + csig[7] + csig[10]) * 0.25;
+      var cb = (csig[2] + csig[5] + csig[8] + csig[11]) * 0.25;
+
+      if (!noReuse) {
         nearPhotoDist.fill(0);
-        var r0 = Math.max(0, row - effGap);
-        var r1 = Math.min(rows - 1, row + effGap);
-        var c0 = Math.max(0, col - effGap);
-        var c1 = Math.min(cols - 1, col + effGap);
+        var r0 = Math.max(0, cRow - effGap);
+        var r1 = Math.min(rows - 1, cRow + effGap);
+        var c0 = Math.max(0, cCol - effGap);
+        var c1 = Math.min(cols - 1, cCol + effGap);
         for (var nr = r0; nr <= r1; nr++) {
           var rowOff = nr * cols;
           for (var nc = c0; nc <= c1; nc++) {
             var ep = gridPhoto[rowOff + nc];
             if (ep >= 0) {
-              var md = Math.abs(nr - row) + Math.abs(nc - col);
+              var md = Math.abs(nr - cRow) + Math.abs(nc - cCol);
               if (nearPhotoDist[ep] === 0 || md < nearPhotoDist[ep]) nearPhotoDist[ep] = md;
             }
           }
         }
+      }
 
-        var bestTid = 0;
-        var bestScore = Infinity;
+      var bestTid = -1;
+      var bestRot = 0;
+      var bestScore = Infinity;
 
-        for (var tid = 0; tid < nTiles; tid++) {
-          var pid = tilePhoto[tid];
-          if (pid === excludePhotoId && numPhotos > 1) continue;
+      for (var tid = 0; tid < nTiles; tid++) {
+        var pid = tilePhoto[tid];
+        if (pid === excludePhotoId && numPhotos > 1) continue;
+        if (noReuse && photoUsage[pid] > 0) continue;
 
-          var tr = tileAvg[tid * 3];
-          var tg = tileAvg[tid * 3 + 1];
-          var tb = tileAvg[tid * 3 + 2];
-          var coarse = redmeanDistSq(cr, cg, cb, tr, tg, tb);
+        var tr = tileAvg[tid * 3];
+        var tg = tileAvg[tid * 3 + 1];
+        var tb = tileAvg[tid * 3 + 2];
+        var coarse = redmeanDistSq(cr, cg, cb, tr, tg, tb);
+        var pen = 0;
+        if (!noReuse) {
           var nd = nearPhotoDist[pid];
-          var pen = nd > 0 ? (repeatPenalty / (nd * nd)) : 0;
+          if (nd > 0) pen = repeatPenalty / (nd * nd);
           var over = photoUsage[pid] - targetAvg * 0.9;
           if (over > 0) pen += over * usePenalty;
+        }
 
-          if (coarse * 0.55 + pen >= bestScore) continue;
+        /* Rotation preserves average RGB, so coarse prune is valid for all 4 rotations! */
+        if (coarse * 0.55 + pen >= bestScore) continue;
 
-          var sc = sigDistance(csig, tiles[tid].sig) + pen;
+        var tsig = tiles[tid].sig;
+        for (var rot = 0; rot < rotCount; rot++) {
+          var sc = sigDistanceRot(csig, tsig, rot) + pen;
           if (sc < bestScore) {
             bestScore = sc;
             bestTid = tid;
+            bestRot = rot;
           }
         }
-
-        grid[cellIdx] = bestTid;
-        var winPid = tilePhoto[bestTid];
-        gridPhoto[cellIdx] = winPid;
-        photoUsage[winPid]++;
       }
+
+      /* Safety fallback if somehow exhausted (should never trigger because grid is capped to <= uniquePhotos) */
+      if (bestTid < 0) {
+        bestTid = 0;
+        bestRot = 0;
+      }
+
+      grid[cellIdx] = bestTid;
+      gridRot[cellIdx] = bestRot;
+      var winPid = tilePhoto[bestTid];
+      gridPhoto[cellIdx] = winPid;
+      photoUsage[winPid]++;
     }
 
     var uniquePhotosUsed = 0;
+    var rotatedCount = 0;
     for (var u = 0; u < numPhotos; u++) {
       if (photoUsage[u] > 0) uniquePhotosUsed++;
     }
-    return { grid: grid, uniqueUsed: uniquePhotosUsed };
+    for (var rc = 0; rc < total; rc++) {
+      if (gridRot[rc] !== 0) rotatedCount++;
+    }
+    return { grid: grid, gridRot: gridRot, uniqueUsed: uniquePhotosUsed, rotatedCount: rotatedCount };
   }
 
   /**
-   * Assemble any target photo from the loaded Maggie catalog in either 'pure' or 'perfected' mode!
+   * Compute aspect-preserving (cols, rows) and, when noReuse is active, cleanly auto-fit
+   * to the maximum dimensions with cols * rows <= availableUniquePhotos so ZERO images repeat!
    */
-  function assembleFromCatalog(catalog, targetPhotoId, maxDim, minGap, mode) {
+  function computeGridDims(aspect, maxDim, noReuse, availableUniquePhotos) {
+    maxDim = Math.max(16, Math.min(120, maxDim || 48));
+    var cols, rows;
+    if (aspect >= 1) {
+      cols = maxDim;
+      rows = Math.max(12, Math.round(maxDim / aspect));
+    } else {
+      rows = maxDim;
+      cols = Math.max(12, Math.round(maxDim * aspect));
+    }
+    var autoCapped = false;
+    if (noReuse && availableUniquePhotos > 0 && cols * rows > availableUniquePhotos) {
+      autoCapped = true;
+      var scale = Math.sqrt(availableUniquePhotos / (cols * rows));
+      cols = Math.max(4, Math.floor(cols * scale));
+      rows = Math.max(4, Math.floor(rows * scale));
+      while (cols * rows > availableUniquePhotos) {
+        if (cols >= rows && cols > 4) cols--;
+        else if (rows > 4) rows--;
+        else break;
+      }
+      /* Try bumping one dimension by +1 if still <= availableUniquePhotos for maximal resolution */
+      if ((cols + 1) * rows <= availableUniquePhotos && aspect >= 1) cols++;
+      else if (cols * (rows + 1) <= availableUniquePhotos && aspect < 1) rows++;
+    }
+    return { cols: cols, rows: rows, autoCapped: autoCapped };
+  }
+
+  /**
+   * Assemble any target photo from the loaded Maggie catalog in 'pure' or 'perfected' mode
+   * with optional `settings = { noReuse, allowRotate }`.
+   */
+  function assembleFromCatalog(catalog, targetPhotoId, maxDim, minGap, mode, settings) {
+    settings = settings || {};
     var target = catalog.photos[targetPhotoId];
     if (!target) throw new Error('Unknown photo id ' + targetPhotoId);
 
@@ -212,16 +338,13 @@ window.DDOM = window.DDOM || {};
     var atlases = catalog.atlasImgs;
     var atlasMeta = catalog.atlases;
 
-    maxDim = Math.max(20, Math.min(76, maxDim || 48));
+    var poolPhotoCount = usePerfected ? catalog.photos.length : (catalog.pureCount || catalog.photos.length);
+    var availUnique = Math.max(1, poolPhotoCount - (targetPhotoId >= 0 && targetPhotoId < poolPhotoCount ? 1 : 0));
+
     var aspect = target.w / Math.max(1, target.h);
-    var cols, rows;
-    if (aspect >= 1) {
-      cols = maxDim;
-      rows = Math.max(16, Math.round(maxDim / aspect));
-    } else {
-      rows = maxDim;
-      cols = Math.max(16, Math.round(maxDim * aspect));
-    }
+    var dims = computeGridDims(aspect, maxDim, !!settings.noReuse, availUnique);
+    var cols = dims.cols;
+    var rows = dims.rows;
 
     var pv = catalog.previewAtlas;
     var pvImg = catalog.previewImg;
@@ -235,11 +358,13 @@ window.DDOM = window.DDOM || {};
     var solved = solveGrid(sampled.cellSigs, tilePool, catalog.photos.length, cols, rows, {
       excludePhotoId: targetPhotoId,
       minGap: minGap || 3,
-      perfected: usePerfected
+      perfected: usePerfected,
+      noReuse: !!settings.noReuse,
+      allowRotate: !!settings.allowRotate
     });
 
     var refCanvas = document.createElement('canvas');
-    var refMax = 900;
+    var refMax = 960;
     var rw = aspect >= 1 ? refMax : Math.round(refMax * aspect);
     var rh = aspect >= 1 ? Math.round(refMax / aspect) : refMax;
     refCanvas.width = rw;
@@ -252,12 +377,18 @@ window.DDOM = window.DDOM || {};
     return {
       isCatalogMode: true,
       mode: usePerfected ? 'perfected' : 'pure',
+      noReuse: !!settings.noReuse,
+      allowRotate: !!settings.allowRotate,
+      autoCappedForUnique: dims.autoCapped,
+      availUnique: availUnique,
       targetId: targetPhotoId,
       targetPhoto: target,
       cols: cols,
       rows: rows,
       aspect: aspect,
       grid: solved.grid,
+      gridRot: solved.gridRot,
+      rotatedCount: solved.rotatedCount,
       tiles: tilePool,
       uniqueUsed: solved.uniqueUsed,
       cellColors: sampled.cellColors,
@@ -276,17 +407,20 @@ window.DDOM = window.DDOM || {};
     var masterImg = opts.masterImg;
     var masterSrc = opts.masterSrc;
     var tileItems = opts.tileItems;
-    var maxDim = Math.max(20, Math.min(72, opts.cols || 48));
+    var maxDim = Math.max(16, Math.min(112, opts.cols || 48));
     var minGap = Math.max(1, Math.min(6, opts.minGap || 3));
+    var noReuse = !!opts.noReuse;
+    var allowRotate = !!opts.allowRotate;
     var onProgress = opts.onProgress || function () {};
 
     var mw = masterImg.naturalWidth || masterImg.width;
     var mh = masterImg.naturalHeight || masterImg.height;
     var aspect = mw / Math.max(1, mh);
-    var cols = aspect >= 1 ? maxDim : Math.max(16, Math.round(maxDim * aspect));
-    var rows = aspect >= 1 ? Math.max(16, Math.round(maxDim / aspect)) : maxDim;
-
     var nTiles = tileItems.length;
+    var dims = computeGridDims(aspect, maxDim, noReuse, nTiles);
+    var cols = dims.cols;
+    var rows = dims.rows;
+
     var atlasCols = Math.ceil(Math.sqrt(nTiles));
     var atlasRows = Math.ceil(nTiles / atlasCols);
     var tilePx = 112;
@@ -358,19 +492,26 @@ window.DDOM = window.DDOM || {};
     var sampled = sampleTargetGrid(masterImg, 0, 0, mw, mh, cols, rows);
     var solved = solveGrid(sampled.cellSigs, tiles, nTiles, cols, rows, {
       excludePhotoId: -1,
-      minGap: minGap
+      minGap: minGap,
+      noReuse: noReuse,
+      allowRotate: allowRotate
     });
 
     onProgress(1, 'Ready!');
     return {
       isCatalogMode: false,
       mode: 'custom',
+      noReuse: noReuse,
+      allowRotate: allowRotate,
+      autoCappedForUnique: dims.autoCapped,
       targetId: -1,
       targetPhoto: { id: -1, d: '', caption: 'Custom Maggie Portrait', fullUrl: masterSrc, w: mw, h: mh },
       cols: cols,
       rows: rows,
       aspect: aspect,
       grid: solved.grid,
+      gridRot: solved.gridRot,
+      rotatedCount: solved.rotatedCount,
       tiles: tiles,
       uniqueUsed: solved.uniqueUsed,
       cellColors: sampled.cellColors,

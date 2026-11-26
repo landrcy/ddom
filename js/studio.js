@@ -164,12 +164,15 @@ window.DDOM = window.DDOM || {};
               progText.textContent = 'Loading custom photos (' + (i + 1) + '/' + customTileFiles.length + ')…';
             }
           }
+          var curSettings = app.getSettings ? app.getSettings() : {};
           mosaic = await window.DDOM.engine.buildFromFiles({
             masterImg: masterLoaded.img,
             masterSrc: masterLoaded.url,
             tileItems: tileItems,
             cols: cols,
             minGap: gap,
+            noReuse: !!curSettings.noReuse,
+            allowRotate: !!curSettings.allowRotate,
             onProgress: function (p, msg) {
               progFill.style.width = Math.round(40 + p * 60) + '%';
               progText.textContent = msg;
@@ -178,6 +181,7 @@ window.DDOM = window.DDOM || {};
         } else if (cat) {
           /* Build user's custom target photo using Maggie's archive in the active Pure/Perfected mode! */
           var activeStyle = app.getMosaicStyle ? app.getMosaicStyle() : 'pure';
+          var activeSettings = app.getSettings ? app.getSettings() : {};
           if (app.ensureModeAtlases) await app.ensureModeAtlases(activeStyle);
           progFill.style.width = '55%';
           progText.textContent = 'Assembling your photo out of Maggie’s archive…';
@@ -197,7 +201,7 @@ window.DDOM = window.DDOM || {};
             previewAtlas: { slotPx: Math.max(mw, mh) },
             previewImg: masterLoaded.img
           });
-          mosaic = window.DDOM.engine.assembleFromCatalog(tmpCat, cat.photos.length, cols, gap, activeStyle);
+          mosaic = window.DDOM.engine.assembleFromCatalog(tmpCat, cat.photos.length, cols, gap, activeStyle, activeSettings);
           mosaic.photos = cat.photos;
           mosaic.isCatalogMode = false;
           mosaic.highResTargetImg = masterLoaded.img;

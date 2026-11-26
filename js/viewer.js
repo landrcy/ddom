@@ -1,17 +1,19 @@
-/* DDOM — Interactive 60fps Zoomable Photomosaic Viewer
+/* DDOM — Interactive 60fps Zoomable Photomosaic Viewer (v4)
    Features:
    - Silky radial wave assembly animation when building a new Maggie photo
+   - Full 0° / 90° / 180° / 270° rotated-tile rendering (overview, wave, deep HD zoom & poster export)
    - Butter-smooth wheel, trackpad pinch, drag pan, double-click zoom, touch pinch-zoom
    - Zoom-adaptive color harmony (accurate portrait at 100%, pure untinted photos when zoomed in)
-   - Lazy HD tile sharpening when zoomed deep into individual Maggie tiles
+   - Rock-solid crop-exact lazy HD tile sharpening with visible-tile cache protection
    - Hold-to-Compare smooth crossfade to the crisp original Maggie photo
-   - Printable high-resolution poster PNG export */
+   - Printable high-resolution poster PNG export (up to 3600px) */
 window.DDOM = window.DDOM || {};
 
 (function () {
   'use strict';
 
   var RM = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var HALF_PI = Math.PI * 0.5;
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
@@ -24,6 +26,18 @@ window.DDOM = window.DDOM || {};
 
   function easeInOutCubic(t) {
     return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  function drawRotatedImage(g, img, sx, sy, sw, sh, dx, dy, dw, dh, rot) {
+    if (!rot) {
+      g.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+      return;
+    }
+    g.save();
+    g.translate(dx + dw * 0.5, dy + dh * 0.5);
+    g.rotate(rot * HALF_PI);
+    g.drawImage(img, sx, sy, sw, sh, -dw * 0.5, -dh * 0.5, dw, dh);
+    g.restore();
   }
 
   function createViewer(canvas, callbacks) {
@@ -47,7 +61,7 @@ window.DDOM = window.DDOM || {};
       minZoom: 0.05,
       maxZoom: 3.2,
       /* Visual controls */
-      harmony: 0.22,
+      harmony: 0.20,
       peekTarget: 0,
       peekAlpha: 0,
       /* Interaction */
@@ -94,8 +108,10 @@ window.DDOM = window.DDOM || {};
 
       state.fitZoom = Math.min(availW / state.worldW, availH / state.worldH);
       state.minZoom = state.fitZoom * 0.72;
-      /* Allow zooming until a single tile fills ~42% of the smaller viewport edge */
-      state.maxZoom = Math.max(state.fitZoom * 18, (Math.min(state.vw, state.vh) * 0.48) / state.tileUnit);
+      /* Allow zooming until a single tile fills ~48% of the smaller viewport edge, even on 96x72 grids! */
+      var longEdge = Math.max(state.mosaic.cols, state.mosaic.rows);
+      var zoomMult = Math.max(18, Math.ceil(longEdge * 0.45));
+      state.maxZoom = Math.max(state.fitZoom * zoomMult, (Math.min(state.vw, state.vh) * 0.48) / state.tileUnit);
 
       if (resetCam) {
         state.camX = state.worldW * 0.5;
@@ -110,15 +126,16 @@ window.DDOM = window.DDOM || {};
     function bakeBaseMosaic() {
       var m = state.mosaic;
       if (!m) return;
-      /* Bake at ~2200px max side so zoomed-out & mid-zoom rendering is buttery 60fps */
-      var maxSide = 2200;
-      var tileDraw = Math.max(16, Math.min(48, Math.floor(maxSide / Math.max(m.cols, m.rows))));
+      /* Bake at up to ~2800px max side so 24..96 grids all look razor-sharp at 60fps */
+      var maxSide = 2800;
+      var tileDraw = Math.max(18, Math.min(56, Math.floor(maxSide / Math.max(m.cols, m.rows))));
       bakedCanvas.width = m.cols * tileDraw;
       bakedCanvas.height = m.rows * tileDraw;
       bakedCtx.imageSmoothingEnabled = true;
       bakedCtx.imageSmoothingQuality = 'high';
 
       var grid = m.grid;
+      var gridRot = m.gridRot;
       var tiles = m.tiles || m.photos;
       var atlases = m.atlases;
       var atlasMeta = m.atlasMeta;
@@ -127,7 +144,8 @@ window.DDOM = window.DDOM || {};
         var rowOff = r * m.cols;
         var dy = r * tileDraw;
         for (var c = 0; c < m.cols; c++) {
-          var tid = grid[rowOff + c];
+          var cellIdx = rowOff + c;
+          var tid = grid[cellIdx];
           var tlTile = tiles[tid];
           if (!tlTile) continue;
           var aIdx = tlTile.a || 0;
@@ -135,7 +153,8 @@ window.DDOM = window.DDOM || {};
           var am = atlasMeta[aIdx];
           if (!aImg || !am) continue;
           var tp = am.tilePx;
-          bakedCtx.drawImage(aImg, tlTile.ax * tp, tlTile.ay * tp, tp, tp, c * tileDraw, dy, tileDraw, tileDraw);
+          var rot = gridRot ? gridRot[cellIdx] : 0;
+          drawRotatedImage(bakedCtx, aImg, tlTile.ax * tp, tlTile.ay * tp, tp, tp, c * tileDraw, dy, tileDraw, tileDraw, rot);
         }
       }
       bakedReady = true;
@@ -173,7 +192,6 @@ window.DDOM = window.DDOM || {};
           for (var c = 0; c < mosaic.cols; c++) {
             var idx = r * mosaic.cols + c;
             var dist = Math.hypot(c - cx, r - cy) / maxDist;
-            /* Radial wave from center with gentle organic jitter */
             var h = Math.sin(idx * 12.9898 + 78.233) * 43758.5453;
             var rnd = h - Math.floor(h);
             delays[idx] = dist * 0.42 + rnd * 0.16;
@@ -331,7 +349,6 @@ window.DDOM = window.DDOM || {};
 
       var keepRunning = false;
 
-      /* Update camera tween */
       if (state.tween) {
         var tw = state.tween;
         var k = clamp((now - tw.t0) / tw.ms, 0, 1);
@@ -348,7 +365,6 @@ window.DDOM = window.DDOM || {};
         state.dirty = true;
       }
 
-      /* Smooth peek crossfade */
       if (Math.abs(state.peekTarget - state.peekAlpha) > 0.004) {
         state.peekAlpha += (state.peekTarget - state.peekAlpha) * 0.22;
         if (Math.abs(state.peekTarget - state.peekAlpha) <= 0.004) {
@@ -359,7 +375,6 @@ window.DDOM = window.DDOM || {};
         state.dirty = true;
       }
 
-      /* Check assembly animation */
       var animT = -1;
       if (state.anim) {
         animT = (now - state.anim.t0) / 1000;
@@ -399,11 +414,9 @@ window.DDOM = window.DDOM || {};
       ctx.lineWidth = 1;
       ctx.strokeRect(tl[0] - mat + 0.5, tl[1] - mat + 0.5, mwPx + mat * 2 - 1, mhPx + mat * 2 - 1);
 
-      /* Inner warm dark backplate so animated gaps look intentional */
       ctx.fillStyle = '#1f1813';
       ctx.fillRect(tl[0], tl[1], mwPx, mhPx);
 
-      /* Visible cell bounds */
       var visC0 = clamp(Math.floor((0 - tl[0]) / tileScreenPx) - 1, 0, m.cols - 1);
       var visC1 = clamp(Math.ceil((state.vw - tl[0]) / tileScreenPx) + 1, 0, m.cols - 1);
       var visR0 = clamp(Math.floor((0 - tl[1]) / tileScreenPx) - 1, 0, m.rows - 1);
@@ -414,9 +427,9 @@ window.DDOM = window.DDOM || {};
       var photos = m.photos;
       var tiles = m.tiles || m.photos;
       var grid = m.grid;
+      var gridRot = m.gridRot;
 
       if (state.anim) {
-        /* Silky radial wave assembly animation */
         var an = state.anim;
         ctx.save();
         ctx.beginPath();
@@ -443,19 +456,19 @@ window.DDOM = window.DDOM || {};
             var cy2 = tl[1] + (r + 0.5) * tileScreenPx + an.oy[idx] * (1 - ep) * state.zoom;
             var sc = 0.32 + 0.68 * ep;
             var sz = tileScreenPx * sc;
+            var rotA = gridRot ? gridRot[idx] : 0;
             ctx.globalAlpha = Math.min(1, p * 1.45);
-            ctx.drawImage(aImg, tileObj.ax * tp, tileObj.ay * tp, tp, tp, cx2 - sz * 0.5, cy2 - sz * 0.5, sz + 0.4, sz + 0.4);
+            drawRotatedImage(ctx, aImg, tileObj.ax * tp, tileObj.ay * tp, tp, tp, cx2 - sz * 0.5, cy2 - sz * 0.5, sz + 0.4, sz + 0.4, rotA);
           }
         }
         ctx.restore();
         ctx.globalAlpha = 1;
       } else if (bakedReady && tileScreenPx < 44) {
-        /* Ultra-fast crisp overview & mid-zoom from baked buffer */
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(bakedCanvas, tl[0], tl[1], mwPx, mhPx);
       } else {
-        /* Crisp per-tile rendering + seamless crop-exact HD sharpening when zoomed deep */
+        /* Crisp per-tile rendering + seamless crop-exact & rotation-exact HD sharpening when zoomed deep */
         var gap = tileScreenPx > 54 ? Math.min(2.5, (tileScreenPx - 54) * 0.04) : 0;
         var wantHd = tileScreenPx >= 108;
         state.visibleIds.clear();
@@ -470,11 +483,11 @@ window.DDOM = window.DDOM || {};
             if (!tile2) continue;
             var ph2 = photos[typeof tile2.p === 'number' ? tile2.p : tid2];
             var dx = tl[0] + c2 * tileScreenPx;
+            var rot2 = gridRot ? gridRot[idx2] : 0;
             if (wantHd && ph2) state.visibleIds.add(ph2.id);
 
             var hd = (wantHd && ph2) ? state.hdCache.get(ph2.id) : null;
             if (hd) {
-              /* Refresh LRU order so visible tiles stay hot, and draw EXACT tile crop rect matching atlas */
               state.hdCache.delete(ph2.id);
               state.hdCache.set(ph2.id, hd);
               var iw = hd.naturalWidth || hd.width;
@@ -492,11 +505,12 @@ window.DDOM = window.DDOM || {};
                 sw = side;
                 sh = side;
               }
-              ctx.drawImage(
-                hd,
+              drawRotatedImage(
+                ctx, hd,
                 sx, sy, sw, sh,
                 dx + gap * 0.5, dy + gap * 0.5,
-                tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35
+                tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35,
+                rot2
               );
             } else {
               var aIdx2 = tile2.a || 0;
@@ -504,11 +518,12 @@ window.DDOM = window.DDOM || {};
               var am2 = atlasMeta[aIdx2];
               if (aImg2 && am2) {
                 var tp2 = am2.tilePx;
-                ctx.drawImage(
-                  aImg2,
+                drawRotatedImage(
+                  ctx, aImg2,
                   tile2.ax * tp2, tile2.ay * tp2, tp2, tp2,
                   dx + gap * 0.5, dy + gap * 0.5,
-                  tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35
+                  tileScreenPx - gap + 0.35, tileScreenPx - gap + 0.35,
+                  rot2
                 );
               }
               if (wantHd && ph2) requestHdTile(ph2);
@@ -517,8 +532,7 @@ window.DDOM = window.DDOM || {};
         }
       }
 
-      /* Zoom-adaptive color harmony glaze: makes the overall portrait razor-accurate at 100%,
-         then gracefully dissolves to 0% as you zoom in past 2.2x so close-up photos stay 100% pure! */
+      /* Zoom-adaptive color harmony glaze */
       var relZoom = state.zoom / Math.max(0.0001, state.fitZoom);
       var zoomFade = clamp(1 - (relZoom - 1.3) / 1.9, 0, 1);
       var animFade = state.anim ? clamp((animT - 0.35) / 0.55, 0, 1) : 1;
@@ -532,7 +546,6 @@ window.DDOM = window.DDOM || {};
         ctx.restore();
       }
 
-      /* Hold-to-Compare original Maggie photo crossfade */
       if (state.peekAlpha > 0.005 && refImg) {
         ctx.save();
         ctx.globalAlpha = state.peekAlpha;
@@ -540,7 +553,6 @@ window.DDOM = window.DDOM || {};
         ctx.restore();
       }
 
-      /* Subtle hairline frame on hovered tile */
       if (state.hoverCell >= 0 && !state.anim && state.peekAlpha < 0.25) {
         var hc = state.hoverCell % m.cols;
         var hr = Math.floor(state.hoverCell / m.cols);
@@ -566,12 +578,12 @@ window.DDOM = window.DDOM || {};
       }
     }
 
-    /* Export printable high-resolution Poster PNG (~3000px) */
+    /* Export printable high-resolution Poster PNG (~3600px) */
     function exportPosterPng(filename) {
       var m = state.mosaic;
       if (!m) return;
-      var maxSide = 3000;
-      var tileOut = Math.max(36, Math.min(84, Math.floor(maxSide / Math.max(m.cols, m.rows))));
+      var maxSide = 3600;
+      var tileOut = Math.max(28, Math.min(84, Math.floor(maxSide / Math.max(m.cols, m.rows))));
       var pad = Math.round(tileOut * 1.4);
       var outW = m.cols * tileOut + pad * 2;
       var outH = m.rows * tileOut + pad * 2;
@@ -586,17 +598,20 @@ window.DDOM = window.DDOM || {};
       og.imageSmoothingQuality = 'high';
 
       var tiles = m.tiles || m.photos;
+      var gridRot = m.gridRot;
       for (var r = 0; r < m.rows; r++) {
         var rowOff = r * m.cols;
         for (var c = 0; c < m.cols; c++) {
-          var tObj = tiles[m.grid[rowOff + c]];
+          var cellIdx = rowOff + c;
+          var tObj = tiles[m.grid[cellIdx]];
           if (!tObj) continue;
           var aIdx = tObj.a || 0;
           var aImg = m.atlases[aIdx];
           var am = m.atlasMeta[aIdx];
           if (!aImg || !am) continue;
           var tp = am.tilePx;
-          og.drawImage(aImg, tObj.ax * tp, tObj.ay * tp, tp, tp, pad + c * tileOut, pad + r * tileOut, tileOut, tileOut);
+          var rotP = gridRot ? gridRot[cellIdx] : 0;
+          drawRotatedImage(og, aImg, tObj.ax * tp, tObj.ay * tp, tp, tp, pad + c * tileOut, pad + r * tileOut, tileOut, tileOut, rotP);
         }
       }
 

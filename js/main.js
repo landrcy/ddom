@@ -1,10 +1,10 @@
-/* DDOM — Daily Dose of Maggie: Dual-Mode Main Controller
-   Loads the precomputed compact Maggie multi-atlas catalog (data/photos.json v3),
-   supports two distinct modes:
-     - "pure":      Full untouched solo Maggie photos (zero extra cropping)
-     - "perfected": Expanded Maggie tile pool cropping up to 50% (always keeping Maggie
-                    in frame) + verified face-free rescued Maggie photos for sharper accuracy
-   Powers Today's Daily Dose, Random Maggie, recursive Lightbox, Gallery, and Studio. */
+/* DDOM — Daily Dose of Maggie: Main Controller (v4)
+   Features:
+   - Dual modes: Pure Maggie (untouched solo photos) & Perfected (<=50% Maggie-verified crops)
+   - Settings popover: Don't Reuse Images (strict unique photos) & Allow Image Rotation (0/90/180/270°)
+   - Expanded grid densities: 24, 36, 48, 64, 80, 96 (and 16..112 in Studio)
+   - Full-image Masonry Gallery with a dedicated "Best & Clearest" showcase section
+   - Today's Daily Dose, Random Maggie, recursive Lightbox, and Export/Custom Studio */
 (function () {
   'use strict';
 
@@ -28,6 +28,13 @@
   var gridSeg = document.getElementById('grid-seg');
   var harmonySlider = document.getElementById('harmony-slider');
   var btnPeek = document.getElementById('btn-peek');
+
+  var btnSettings = document.getElementById('btn-settings');
+  var settingsDot = document.getElementById('settings-dot');
+  var settingsPopover = document.getElementById('settings-popover');
+  var settingsUniqueNote = document.getElementById('settings-unique-note');
+  var toggleNoReuse = document.getElementById('toggle-no-reuse');
+  var toggleAllowRotate = document.getElementById('toggle-allow-rotate');
 
   var dailyCard = document.getElementById('daily-card');
   var dailyThumb = document.getElementById('daily-thumb');
@@ -55,7 +62,15 @@
 
   var galBackdrop = document.getElementById('gallery-modal');
   var galClose = document.getElementById('gal-close');
+  var galTabs = document.getElementById('gallery-tabs');
+  var galBody = document.getElementById('gallery-body');
+  var galBestSection = document.getElementById('gal-best-section');
+  var galAllSection = document.getElementById('gal-all-section');
+  var galBestGrid = document.getElementById('gallery-best-grid');
+  var galBestSub = document.getElementById('gal-best-sub');
+  var btnGalSeeBest = document.getElementById('btn-gal-see-best');
   var galGrid = document.getElementById('gallery-grid');
+  var galAllSub = document.getElementById('gal-all-sub');
   var galSub = document.getElementById('gal-sub');
   var galFoot = document.getElementById('gallery-foot');
   var btnGalMore = document.getElementById('btn-gallery-more');
@@ -63,6 +78,7 @@
   var catalog = null;
   var atlasPromises = [];
   var mosaicStyle = 'pure'; /* 'pure' | 'perfected' */
+  var settings = { noReuse: false, allowRotate: false };
   var userTouchedHarmony = false;
   var gridSize = 48;
   var antiRepeat = 3;
@@ -70,8 +86,10 @@
   var currentSource = 'daily'; /* 'daily' | 'random' | 'picked' | 'custom' */
   var recentHistory = [];
   var lbState = { photoId: -1, cellIdx: -1 };
+  var galleryTab = 'all'; /* 'all' (Best preview + All) | 'best' (Full Best & Clearest) */
   var galleryRendered = 0;
-  var GALLERY_PAGE = 96;
+  var galleryBestRenderedMode = '';
+  var GALLERY_PAGE = 72;
 
   function loadImg(src) {
     return new Promise(function (resolve, reject) {
@@ -105,7 +123,6 @@
     return Promise.all(needed);
   }
 
-  /* Deterministic hash from today's local date (YYYY-MM-DD) for Daily Dose of Maggie */
   function todayKey() {
     var now = new Date();
     var y = now.getFullYear();
@@ -129,7 +146,7 @@
   }
 
   function getDailyPhotoId(cat) {
-    var pool = (cat.featuredIds && cat.featuredIds.length) ? cat.featuredIds : null;
+    var pool = (cat.bestIds && cat.bestIds.length) ? cat.bestIds : (cat.featuredIds && cat.featuredIds.length ? cat.featuredIds : null);
     var h = hashString('ddom-maggie-' + todayKey());
     if (pool) return pool[h % pool.length];
     return h % cat.pureCount;
@@ -151,18 +168,18 @@
     return ph.src || ph.fullUrl || '';
   }
 
-  function photoSquareThumbUrl(ph, size) {
+  function photoGalleryUrl(ph) {
     if (!ph) return '';
-    if (ph.u) return ph.u + '=w' + (size || 240) + '-h' + (size || 240) + '-c-no';
+    /* Full uncropped aspect ratio image (NO -c square crop!) */
+    if (ph.u) return ph.u + '=w480-no';
     return ph.src || ph.fullUrl || '';
   }
 
-  /* Extract a crisp dataURL thumbnail from the local atlas so UI cards never stall */
   function atlasThumbDataUrl(ph) {
-    if (!catalog || !ph || typeof ph.a !== 'number') return photoSquareThumbUrl(ph, 200);
+    if (!catalog || !ph || typeof ph.a !== 'number') return photoGalleryUrl(ph);
     var aImg = catalog.atlasImgs[ph.a];
     var am = catalog.atlases[ph.a];
-    if (!aImg || !am) return photoSquareThumbUrl(ph, 200);
+    if (!aImg || !am) return photoGalleryUrl(ph);
     var c = document.createElement('canvas');
     c.width = am.tilePx;
     c.height = am.tilePx;
@@ -177,6 +194,42 @@
       btn.classList.toggle('active', active);
       btn.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
+  }
+
+  function syncSettingsUi() {
+    if (toggleNoReuse) toggleNoReuse.checked = !!settings.noReuse;
+    if (toggleAllowRotate) toggleAllowRotate.checked = !!settings.allowRotate;
+    var anyOn = !!(settings.noReuse || settings.allowRotate);
+    if (settingsDot) settingsDot.hidden = !anyOn;
+    if (settingsUniqueNote && catalog) {
+      var maxU = Math.max(0, getActivePhotoCount() - 1);
+      settingsUniqueNote.textContent = maxU.toLocaleString() + ' unique photos';
+    }
+  }
+
+  function saveSettings() {
+    try {
+      localStorage.setItem('ddom_settings_v4', JSON.stringify(settings));
+    } catch (e) {}
+  }
+
+  function loadSavedSettings() {
+    try {
+      var raw = localStorage.getItem('ddom_settings_v4');
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (typeof parsed.noReuse === 'boolean') settings.noReuse = parsed.noReuse;
+        if (typeof parsed.allowRotate === 'boolean') settings.allowRotate = parsed.allowRotate;
+      }
+    } catch (e) {}
+  }
+
+  function setSettingsOpen(open) {
+    if (!settingsPopover || !btnSettings) return;
+    settingsPopover.hidden = !open;
+    btnSettings.classList.toggle('active', open);
+    btnSettings.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) syncSettingsUi();
   }
 
   function applyDefaultHarmonyForMode(style) {
@@ -224,19 +277,23 @@
 
   function updateHudForMosaic(m, sourceKind) {
     var dateTxt = m.targetPhoto && m.targetPhoto.d ? formatDatePretty(m.targetPhoto.d) : (m.targetPhoto ? m.targetPhoto.caption : 'Maggie');
+    var flags = [];
+    if (m.noReuse) flags.push(m.autoCappedForUnique ? 'No Reuse (auto-fit)' : 'No Reuse');
+    if (m.allowRotate) flags.push('Rotated');
+    var flagStr = flags.length ? (' · ' + flags.join(' · ')) : '';
+
     if (m.mode === 'perfected') {
       statsEl.textContent =
         'Perfected · ' + m.cols + '×' + m.rows + ' · ' +
-        m.uniqueUsed.toLocaleString() + ' Maggie photos (' +
-        m.tiles.length.toLocaleString() + ' crops)';
+        m.uniqueUsed.toLocaleString() + ' photos' + flagStr;
     } else if (m.mode === 'custom') {
       statsEl.textContent =
         'Custom · ' + m.cols + '×' + m.rows + ' · ' +
-        m.uniqueUsed.toLocaleString() + ' photos';
+        m.uniqueUsed.toLocaleString() + ' photos' + flagStr;
     } else {
       statsEl.textContent =
         'Pure · ' + m.cols + '×' + m.rows + ' · ' +
-        m.uniqueUsed.toLocaleString() + ' untouched Maggie photos';
+        m.uniqueUsed.toLocaleString() + ' Maggie photos' + flagStr;
     }
 
     dailyCard.classList.remove('hidden-card');
@@ -259,14 +316,13 @@
 
   function assemblePhoto(photoId, sourceKind, animate) {
     if (!catalog) return;
-    /* Keep Pure Maggie strictly within untouched solo photos */
     if (mosaicStyle === 'pure' && photoId >= catalog.pureCount) {
       photoId = getDailyPhotoId(catalog);
     }
     currentTargetId = photoId;
     currentSource = sourceKind || 'random';
 
-    var m = DDOM.engine.assembleFromCatalog(catalog, photoId, gridSize, antiRepeat, mosaicStyle);
+    var m = DDOM.engine.assembleFromCatalog(catalog, photoId, gridSize, antiRepeat, mosaicStyle, settings);
     viewer.setMosaic(m, animate !== false);
     updateHudForMosaic(m, currentSource);
   }
@@ -276,11 +332,13 @@
     if (nextStyle === mosaicStyle && viewer.getMosaic()) return;
     mosaicStyle = nextStyle;
     syncModeButtons();
+    syncSettingsUi();
     applyDefaultHarmonyForMode(mosaicStyle);
 
-    /* Reset gallery DOM so it shows the active mode's photo set next time it opens */
     galleryRendered = 0;
+    galleryBestRenderedMode = '';
     galGrid.innerHTML = '';
+    galBestGrid.innerHTML = '';
 
     if (!catalog) return;
     var needsFetch = false;
@@ -303,6 +361,16 @@
         currentSource = 'daily';
       }
       assemblePhoto(targetId, currentSource, animate !== false);
+    }
+  }
+
+  function applySettings(next, animate) {
+    if (typeof next.noReuse === 'boolean') settings.noReuse = next.noReuse;
+    if (typeof next.allowRotate === 'boolean') settings.allowRotate = next.allowRotate;
+    saveSettings();
+    syncSettingsUi();
+    if (catalog && currentSource !== 'custom') {
+      assemblePhoto(currentTargetId, currentSource, animate !== false);
     }
   }
 
@@ -345,8 +413,12 @@
       var col = lbState.cellIdx % m.cols;
       var row = Math.floor(lbState.cellIdx / m.cols);
       var tileObj = (m.tiles || m.photos)[m.grid[lbState.cellIdx]];
-      var cropNote = (m.mode === 'perfected' && tileObj && tileObj.cr) ? ' · Perfected ≤50% crop' : '';
-      lbSub.textContent = 'Tile at Row ' + (row + 1) + ', Column ' + (col + 1) + ' of ' + m.cols + '×' + m.rows + cropNote;
+      var notes = [];
+      if (m.mode === 'perfected' && tileObj && tileObj.cr) notes.push('Perfected ≤50% crop');
+      var rot = m.gridRot ? m.gridRot[lbState.cellIdx] : 0;
+      if (rot) notes.push('Rotated ' + (rot * 90) + '°');
+      var noteStr = notes.length ? (' · ' + notes.join(' · ')) : '';
+      lbSub.textContent = 'Tile at Row ' + (row + 1) + ', Column ' + (col + 1) + ' of ' + m.cols + '×' + m.rows + noteStr;
       lbLocator.hidden = false;
       lbLocate.hidden = false;
       lbMinimapImg.src = m.refCanvas && m.refCanvas.toDataURL ? m.refCanvas.toDataURL('image/jpeg', 0.72) : (m.targetPhoto.fullUrl || '');
@@ -399,56 +471,143 @@
     }
   });
 
-  /* ---------- Gallery Archive Modal ---------- */
+  /* ---------- Full-Image Masonry Gallery + Best & Clearest Showcase ---------- */
+  function buildGalleryCard(ph, badgeText) {
+    var card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'gal-item';
+
+    var wrap = document.createElement('div');
+    wrap.className = 'gal-img-wrap';
+    /* Explicit natural aspect ratio prevents layout shift & guarantees full images never collapse to lines */
+    var rawAsp = (ph.w && ph.h) ? (ph.w / ph.h) : 1;
+    var asp = Math.max(0.56, Math.min(1.85, rawAsp));
+    wrap.style.aspectRatio = asp.toFixed(4);
+
+    var img = document.createElement('img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.src = photoGalleryUrl(ph);
+    img.alt = ph.d ? ('Maggie ' + formatDatePretty(ph.d)) : ('Maggie #' + (ph.id + 1));
+    wrap.appendChild(img);
+
+    if (badgeText) {
+      var badge = document.createElement('span');
+      badge.className = 'gal-badge';
+      badge.textContent = badgeText;
+      wrap.appendChild(badge);
+    }
+
+    var cap = document.createElement('span');
+    cap.className = 'gal-cap';
+    cap.textContent = ph.d ? formatDatePretty(ph.d) : ('Maggie #' + (ph.id + 1));
+
+    card.appendChild(wrap);
+    card.appendChild(cap);
+    card.addEventListener('click', function () {
+      galBackdrop.hidden = true;
+      openLightbox(ph.id, -1);
+    });
+    return card;
+  }
+
+  function renderBestSection(fullList) {
+    if (!catalog) return;
+    var bestPool = (catalog.bestIds && catalog.bestIds.length) ? catalog.bestIds : (catalog.featuredIds || []);
+    var limit = getActivePhotoCount();
+    var validBest = bestPool.filter(function (id) { return id >= 0 && id < limit; });
+    var count = fullList ? validBest.length : Math.min(16, validBest.length);
+
+    var key = mosaicStyle + ':' + (fullList ? 'full' : 'preview');
+    if (galleryBestRenderedMode !== key) {
+      galBestGrid.innerHTML = '';
+      var frag = document.createDocumentFragment();
+      for (var i = 0; i < count; i++) {
+        var ph = catalog.photos[validBest[i]];
+        if (!ph) continue;
+        frag.appendChild(buildGalleryCard(ph, i < 8 ? 'Clearest' : ''));
+      }
+      galBestGrid.appendChild(frag);
+      galleryBestRenderedMode = key;
+    }
+
+    if (galBestSub) {
+      galBestSub.textContent = fullList
+        ? ('Top ' + validBest.length + ' sharpest, clearest, highest-clarity Maggie shots.')
+        : ('Hand-ranked sharpest focus & cleanest shots — showing ' + count + ' of ' + validBest.length + '.');
+    }
+    if (btnGalSeeBest) {
+      btnGalSeeBest.hidden = !!fullList || validBest.length <= count;
+      btnGalSeeBest.textContent = 'View all ' + validBest.length + ' clearest →';
+    }
+  }
+
   function appendGalleryBatch() {
     if (!catalog) return;
     var limit = getActivePhotoCount();
     var frag = document.createDocumentFragment();
     var end = Math.min(limit, galleryRendered + GALLERY_PAGE);
     for (var i = galleryRendered; i < end; i++) {
-      (function (ph) {
-        var card = document.createElement('button');
-        card.type = 'button';
-        card.className = 'gal-item';
-        var img = document.createElement('img');
-        img.loading = 'lazy';
-        img.decoding = 'async';
-        img.src = photoSquareThumbUrl(ph, 220);
-        img.alt = ph.d ? ('Maggie ' + formatDatePretty(ph.d)) : ('Maggie #' + (ph.id + 1));
-        var cap = document.createElement('span');
-        cap.className = 'gal-cap';
-        cap.textContent = ph.d ? formatDatePretty(ph.d) : ('Maggie #' + (ph.id + 1));
-        card.appendChild(img);
-        card.appendChild(cap);
-        card.addEventListener('click', function () {
-          galBackdrop.hidden = true;
-          openLightbox(ph.id, -1);
-        });
-        frag.appendChild(card);
-      })(catalog.photos[i]);
+      frag.appendChild(buildGalleryCard(catalog.photos[i], ''));
     }
     galGrid.appendChild(frag);
     galleryRendered = end;
     galFoot.hidden = galleryRendered >= limit;
   }
 
-  function openGallery() {
+  function setGalleryTab(tab) {
+    galleryTab = tab === 'best' ? 'best' : 'all';
+    if (galTabs) {
+      galTabs.querySelectorAll('.gal-tab').forEach(function (el) {
+        var active = el.dataset.galTab === galleryTab;
+        el.classList.toggle('active', active);
+        el.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    }
+    if (galleryTab === 'best') {
+      galBestSection.hidden = false;
+      galAllSection.hidden = true;
+      renderBestSection(true);
+    } else {
+      galBestSection.hidden = false;
+      galAllSection.hidden = false;
+      renderBestSection(false);
+      if (galleryRendered === 0) appendGalleryBatch();
+    }
+    if (galBody) galBody.scrollTop = 0;
+  }
+
+  function openGallery(initialTab) {
     if (!catalog) return;
+    setSettingsOpen(false);
     var limit = getActivePhotoCount();
     if (mosaicStyle === 'perfected') {
-      galSub.textContent = limit.toLocaleString() + ' Maggie photos (' + catalog.perfectedTiles.length.toLocaleString() + ' Perfected crops) — click any photo to inspect or assemble.';
+      galSub.textContent = limit.toLocaleString() + ' Maggie photos (' + catalog.perfectedTiles.length.toLocaleString() + ' Perfected crops) — click any full photo to inspect or assemble.';
     } else {
-      galSub.textContent = limit.toLocaleString() + ' untouched solo photos of Maggie — click any photo to view full size or assemble a mosaic from it.';
+      galSub.textContent = limit.toLocaleString() + ' solo Maggie photos — click any full photo to inspect or assemble a mosaic from it.';
     }
-    if (galleryRendered === 0) appendGalleryBatch();
+    if (galAllSub) {
+      galAllSub.textContent = limit.toLocaleString() + ' full uncropped photos in natural proportions.';
+    }
+    setGalleryTab(initialTab || 'all');
     galBackdrop.hidden = false;
   }
 
+  if (galTabs) {
+    galTabs.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-gal-tab]');
+      if (!b) return;
+      setGalleryTab(b.dataset.galTab);
+    });
+  }
+  if (btnGalSeeBest) {
+    btnGalSeeBest.addEventListener('click', function () { setGalleryTab('best'); });
+  }
   btnGalMore.addEventListener('click', appendGalleryBatch);
   galClose.addEventListener('click', function () { galBackdrop.hidden = true; });
   galBackdrop.addEventListener('click', function (e) { if (e.target === galBackdrop) galBackdrop.hidden = true; });
 
-  /* ---------- Wire Topbar & Dock Controls ---------- */
+  /* ---------- Wire Topbar, Settings & Dock Controls ---------- */
   if (modeSwitch) {
     modeSwitch.addEventListener('click', function (e) {
       var btn = e.target.closest('.mode-btn');
@@ -457,12 +616,34 @@
     });
   }
 
+  if (btnSettings) {
+    btnSettings.addEventListener('click', function (e) {
+      e.stopPropagation();
+      setSettingsOpen(settingsPopover.hidden);
+    });
+  }
+  if (toggleNoReuse) {
+    toggleNoReuse.addEventListener('change', function () {
+      applySettings({ noReuse: toggleNoReuse.checked }, true);
+    });
+  }
+  if (toggleAllowRotate) {
+    toggleAllowRotate.addEventListener('change', function () {
+      applySettings({ allowRotate: toggleAllowRotate.checked }, true);
+    });
+  }
+  document.addEventListener('pointerdown', function (e) {
+    if (!settingsPopover || settingsPopover.hidden) return;
+    if (settingsPopover.contains(e.target) || (btnSettings && btnSettings.contains(e.target))) return;
+    setSettingsOpen(false);
+  });
+
   btnRandom.addEventListener('click', pickRandomPhoto);
   btnDaily.addEventListener('click', function () {
     if (!catalog) return;
     assemblePhoto(getDailyPhotoId(catalog), 'daily', true);
   });
-  btnGallery.addEventListener('click', openGallery);
+  btnGallery.addEventListener('click', function () { openGallery('all'); });
   brandReset.addEventListener('click', function (e) {
     e.preventDefault();
     viewer.resetView(true);
@@ -519,6 +700,7 @@
     viewer: viewer,
     getCatalog: function () { return catalog; },
     getMosaicStyle: function () { return mosaicStyle; },
+    getSettings: function () { return { noReuse: settings.noReuse, allowRotate: settings.allowRotate }; },
     ensureModeAtlases: ensureModeAtlases,
     setGridDetail: function (cols, gap) {
       gridSize = cols;
@@ -537,7 +719,7 @@
       updateHudForMosaic(m, 'custom');
     }
   });
-  btnStudio.addEventListener('click', function () { studio.open(); });
+  btnStudio.addEventListener('click', function () { setSettingsOpen(false); studio.open(); });
 
   /* Keyboard shortcuts */
   window.addEventListener('keydown', function (e) {
@@ -554,6 +736,10 @@
     }
     if (studio.isOpen()) {
       if (e.key === 'Escape') studio.close();
+      return;
+    }
+    if (settingsPopover && !settingsPopover.hidden && e.key === 'Escape') {
+      setSettingsOpen(false);
       return;
     }
     if (e.key === ' ' && !e.repeat) {
@@ -593,7 +779,7 @@
     return out;
   }
 
-  /* Compute average tile-to-cell RGB error for quantitative Pure vs Perfected verification */
+  /* Compute average tile-to-cell 2x2 perceptual RGB error (accounting for tile rotation!) */
   function computeCurrentMosaicError() {
     var m = viewer.getMosaic();
     if (!m || !m.cellColors || !m.grid || !m.tiles) return null;
@@ -615,15 +801,17 @@
   /* ---------- Bootstrap Catalog & Assemble Today's Dose of Maggie ---------- */
   async function boot() {
     try {
+      loadSavedSettings();
       var qs = new URLSearchParams(location.search);
-      if (qs.get('mode') === 'perfected') {
-        mosaicStyle = 'perfected';
-      }
+      if (qs.get('mode') === 'perfected') mosaicStyle = 'perfected';
+      if (qs.has('noreuse')) settings.noReuse = qs.get('noreuse') !== '0';
+      if (qs.has('rotate')) settings.allowRotate = qs.get('rotate') !== '0';
       syncModeButtons();
+      syncSettingsUi();
       applyDefaultHarmonyForMode(mosaicStyle);
 
       loaderText.textContent = 'Loading Maggie’s photo archive…';
-      var res = await fetch('data/photos.json?v=3');
+      var res = await fetch('data/photos.json?v=4');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       var data = await res.json();
 
@@ -644,6 +832,7 @@
         pureCount: pureCount,
         rescuedCount: data.rescuedCount || 0,
         featuredIds: data.featuredIds || null,
+        bestIds: data.bestIds || data.featuredIds || [],
         atlases: data.atlases,
         atlasImgs: new Array(data.atlases.length),
         previewAtlas: data.previewAtlas,
@@ -652,6 +841,7 @@
         perfectedTiles: perfectedTiles
       };
       atlasPromises = new Array(data.atlases.length);
+      syncSettingsUi();
 
       loaderText.textContent = mosaicStyle === 'perfected'
         ? ('Loading ' + perfectedTiles.length.toLocaleString() + ' Perfected Maggie tiles…')
@@ -662,7 +852,6 @@
       });
       await Promise.all([ensureModeAtlases(mosaicStyle), pvPromise]);
 
-      /* Quietly warm the Perfected atlases in the background so switching modes is instant */
       if (mosaicStyle === 'pure') {
         setTimeout(function () { ensureModeAtlases('perfected').catch(function () {}); }, 600);
       }
@@ -684,21 +873,25 @@
       assemblePhoto(startId, startSource, true);
       loaderEl.classList.add('done');
 
-      /* Expose tiny debug handle for automated verification */
+      /* Expose clean debug handle for automated verification */
       window.__ddom = {
         getCatalogCount: function () { return catalog ? catalog.photos.length : 0; },
         getPureCount: function () { return catalog ? catalog.pureCount : 0; },
         getPureTileCount: function () { return catalog ? catalog.pureTiles.length : 0; },
         getPerfectedTileCount: function () { return catalog ? catalog.perfectedTiles.length : 0; },
+        getBestCount: function () { return catalog && catalog.bestIds ? catalog.bestIds.length : 0; },
         getMode: function () { return mosaicStyle; },
         setMode: function (m) { return setMosaicStyle(m, false); },
+        getSettings: function () { return { noReuse: settings.noReuse, allowRotate: settings.allowRotate }; },
+        setSettings: function (s) { applySettings(s, false); },
         getMosaic: function () { return viewer.getMosaic(); },
         getAvgColorError: computeCurrentMosaicError,
         pickRandom: pickRandomPhoto,
         assemble: assemblePhoto,
         zoomIn: function () { viewer.zoomIn(); },
         resetView: function () { viewer.resetView(false); },
-        openLightbox: openLightbox
+        openLightbox: openLightbox,
+        openGallery: openGallery
       };
     } catch (err) {
       loaderText.textContent = 'Could not load Maggie’s mosaic: ' + (err.message || err);
